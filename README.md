@@ -13,7 +13,7 @@ Phone-first ArUco / AprilTag tools. Static site, no build step, nothing leaves t
 - Offline-first: opens from the phone's cache instantly, updates in the background; skips the start tap when camera access is already granted
 - Track-then-verify: a confirmed tag missed by a pass (motion blur) is re-checked around its predicted position (at most 3 per frame, ~1 ms each), accepting only the same ID, and fades out over two passes; cuts flicker while moving without adding false reads
 - Tags fade in and out instead of popping; labels always drawn above outlines
-- Live camera with motion-compensated overlays: the picture is never held back for detection; outlines are moved by the camera motion measured since the analyzed frame (row/column profile matching on a 160 px copy, <1 ms), so they stay on the tags while panning
+- Live camera with motion-compensated overlays: the picture is never held back for detection; outlines are moved by the camera motion measured since the analyzed frame (slide, zoom and twist fitted to profile shifts in a 3×3 grid of a 160 px copy, ~1 ms), so they stay on the tags while panning, zooming or turning the phone
 - Auto range: alternates full-frame and 2× center passes so near and far tags both read
 - Strict decoding: solid black border, minimum contrast, no ambiguous cells, exact code match; a tag must be read twice in a row before it is shown
 - Optional error correction, sized to each set's real minimum distance (rotations included)

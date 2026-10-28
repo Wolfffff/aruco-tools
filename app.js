@@ -63,65 +63,150 @@ function trackAlpha(t) {
 /* ---------- camera motion ----------
    The screen shows the live camera. Detection results describe a frame from a few tens of
    milliseconds ago, so outlines are moved by how much the picture itself has moved since
-   that frame. Motion is measured between consecutive frames on a 160 px wide copy, by
-   matching column and row brightness profiles (integral projections): well under a
-   millisecond, and it captures what dominates handheld use, panning and tilting. */
+   that frame: sliding (pan, tilt), scaling (zoom, moving closer or away) and twisting.
+
+   Each frame, a 160 px wide copy is split into a 3×3 grid. In each cell the sideways and
+   up/down shift is found by matching column and row brightness profiles with the previous
+   frame. A single slide + scale + rotation is then fitted to the nine shifts by least
+   squares (zooming moves the outer cells outward, twisting moves them around), ignoring
+   cells without enough texture or that disagree (a hand passing through). About a
+   millisecond per frame.
+
+   Transforms are similarities about the frame centre, in camera pixels:
+   p' = [a −b; b a]·p + t. `motion.M` maps an arbitrary start frame to the current one. */
 
 const MOTION_W = 160;
+const GRID = 3;
 const motionCanvas = document.createElement('canvas');
 const mctx = motionCanvas.getContext('2d');
-const motion = { cols: null, rows: null, x: 0, y: 0 }; // x, y: total picture shift in camera pixels
+const IDENTITY = { a: 1, b: 0, tx: 0, ty: 0 };
+const motion = { prev: null, M: { ...IDENTITY } };
 
-// Profile derivatives: robust to exposure changes, which shift a profile but not its edges.
-function profiles(data, w, h) {
-  const cols = new Float32Array(w), rows = new Float32Array(h);
+const compose = (D, M) => ({ // D after M
+  a: D.a * M.a - D.b * M.b, b: D.a * M.b + D.b * M.a,
+  tx: D.a * M.tx - D.b * M.ty + D.tx, ty: D.b * M.tx + D.a * M.ty + D.ty,
+});
+const invert = (M) => {
+  const d = M.a * M.a + M.b * M.b, a = M.a / d, b = -M.b / d;
+  return { a, b, tx: -(a * M.tx - b * M.ty), ty: -(b * M.tx + a * M.ty) };
+};
+
+// Column sums per horizontal band and row sums per vertical band; each grid cell's
+// profiles are slices of these. Uses the green channel.
+function bandProfiles(data, w, h) {
+  const cols = Array.from({ length: GRID }, () => new Float32Array(w));
+  const rows = Array.from({ length: GRID }, () => new Float32Array(h));
   for (let y = 0, i = 1; y < h; y++) {
-    let r = 0;
-    for (let x = 0; x < w; x++, i += 4) { const g = data[i]; cols[x] += g; r += g; }
-    rows[y] = r;
+    const by = Math.min(GRID - 1, ((y * GRID) / h) | 0);
+    const cb = cols[by];
+    for (let x = 0; x < w; x++, i += 4) {
+      const g = data[i];
+      cb[x] += g;
+      rows[Math.min(GRID - 1, ((x * GRID) / w) | 0)][y] += g;
+    }
   }
-  const d = (p) => { const o = new Float32Array(p.length - 1); for (let i = 0; i < o.length; i++) o[i] = p[i + 1] - p[i]; return o; };
-  return { cols: d(cols), rows: d(rows) };
+  return { cols, rows };
 }
 
-// Shift s (in profile samples, sub-sample precise) such that cur[i + s] ≈ prev[i].
+// Derivative of a profile slice: edges, not brightness, so exposure changes don't count.
+function edges(p, from, to) {
+  const o = new Float32Array(to - from - 1);
+  for (let i = 0; i < o.length; i++) o[i] = p[from + i + 1] - p[from + i];
+  return o;
+}
+
+// Shift s (sub-sample) with cur[i + s] ≈ prev[i], or null when the slice has too little
+// texture or the best match is not clearly better than the rest.
 function matchShift(prev, cur, range) {
   const n = prev.length;
-  let best = 0, bestCost = Infinity;
+  let energy = 0;
+  for (let i = 0; i < n; i++) energy += Math.abs(prev[i]);
+  if (energy / n < 2) return null; // flat: a wall, the sky
+  let best = 0, bestCost = Infinity, sum = 0;
   const costs = new Float32Array(2 * range + 1);
   for (let s = -range; s <= range; s++) {
     let c = 0, k = 0;
     for (let i = Math.max(0, -s); i < Math.min(n, n - s); i++, k++) c += Math.abs(prev[i] - cur[i + s]);
     c /= Math.max(1, k);
-    costs[s + range] = c;
+    costs[s + range] = c; sum += c;
     if (c < bestCost) { bestCost = c; best = s; }
   }
-  if (best === -range || best === range) return 0; // at the edge of the search: unreliable
+  if (best === -range || best === range) return null; // at the edge of the search
+  if (bestCost > 0.8 * (sum / costs.length)) return null; // no distinct match
   const l = costs[best + range - 1], m = costs[best + range], r = costs[best + range + 1];
   const den = l - 2 * m + r;
-  const sub = den > 0 ? (0.5 * (l - r)) / den : 0;
-  const shift = best + sub;
-  return Math.abs(shift) < 0.15 ? 0 : shift; // ignore sensor noise when the camera is still
+  return best + (den > 0 ? (0.5 * (l - r)) / den : 0);
+}
+
+// Least-squares similarity from point pairs (centre-relative), optionally dropping outliers.
+function fitSimilarity(src, dst) {
+  const n = src.length;
+  let mx = 0, my = 0, nx = 0, ny = 0;
+  for (let i = 0; i < n; i++) { mx += src[i][0]; my += src[i][1]; nx += dst[i][0]; ny += dst[i][1]; }
+  mx /= n; my /= n; nx /= n; ny /= n;
+  let sa = 0, sb = 0, ss = 0;
+  for (let i = 0; i < n; i++) {
+    const x = src[i][0] - mx, y = src[i][1] - my, u = dst[i][0] - nx, v = dst[i][1] - ny;
+    sa += x * u + y * v; sb += x * v - y * u; ss += x * x + y * y;
+  }
+  const a = ss > 0 ? sa / ss : 1, b = ss > 0 ? sb / ss : 0;
+  return { a, b, tx: nx - (a * mx - b * my), ty: ny - (b * mx + a * my) };
+}
+
+const apply = (M, p) => [M.a * p[0] - M.b * p[1] + M.tx, M.b * p[0] + M.a * p[1] + M.ty];
+
+function frameDelta(prev, cur, w, h) {
+  const src = [], dst = [];
+  for (let gy = 0; gy < GRID; gy++) {
+    for (let gx = 0; gx < GRID; gx++) {
+      const x0 = Math.round((gx * w) / GRID), x1 = Math.round(((gx + 1) * w) / GRID);
+      const y0 = Math.round((gy * h) / GRID), y1 = Math.round(((gy + 1) * h) / GRID);
+      const dx = matchShift(edges(prev.cols[gy], x0, x1), edges(cur.cols[gy], x0, x1), 8);
+      const dy = matchShift(edges(prev.rows[gx], y0, y1), edges(cur.rows[gx], y0, y1), 10);
+      if (dx === null || dy === null) continue;
+      const c = [(x0 + x1) / 2 - w / 2, (y0 + y1) / 2 - h / 2];
+      src.push(c); dst.push([c[0] + dx, c[1] + dy]);
+    }
+  }
+  if (src.length < 3) return null;
+  let D = fitSimilarity(src, dst);
+  // Drop cells that disagree with the rest (something moving on its own), then refit.
+  const keep = src.map((p, i) => Math.hypot(...apply(D, p).map((v, k) => v - dst[i][k])) < 1.5);
+  if (keep.filter(Boolean).length >= 3 && keep.includes(false)) {
+    D = fitSimilarity(src.filter((_, i) => keep[i]), dst.filter((_, i) => keep[i]));
+  }
+  // Keep it physical: per frame, zoom by at most 15% and twist by at most ~8 degrees.
+  const scale = Math.hypot(D.a, D.b);
+  if (scale < 0.85 || scale > 1.15 || Math.abs(Math.atan2(D.b, D.a)) > 0.14) return null;
+  // A still camera: ignore sensor noise.
+  if (Math.abs(scale - 1) < 0.002 && Math.abs(D.b) < 0.002 && Math.hypot(D.tx, D.ty) < 0.15) return IDENTITY;
+  return D;
 }
 
 function updateMotion(vw, vh) {
   const w = MOTION_W, h = Math.max(16, Math.round((MOTION_W * vh) / vw));
   if (motionCanvas.width !== w || motionCanvas.height !== h) {
     motionCanvas.width = w; motionCanvas.height = h;
-    motion.cols = null;
+    motion.prev = null;
   }
   mctx.drawImage(video, 0, 0, w, h);
-  const p = profiles(mctx.getImageData(0, 0, w, h).data, w, h);
-  if (motion.cols) {
-    const k = vw / w; // camera pixels per profile sample
-    motion.x += matchShift(motion.cols, p.cols, 14) * k;
-    motion.y += matchShift(motion.rows, p.rows, 14) * k;
+  const cur = bandProfiles(mctx.getImageData(0, 0, w, h).data, w, h);
+  if (motion.prev) {
+    const D = frameDelta(motion.prev, cur, w, h);
+    if (D) {
+      const k = vw / w; // camera pixels per motion-image pixel
+      motion.M = compose({ a: D.a, b: D.b, tx: D.tx * k, ty: D.ty * k }, motion.M);
+    }
   }
-  motion.cols = p.cols; motion.rows = p.rows;
+  motion.prev = cur;
 }
 
-// A track's corners as they would appear in the current picture.
-const shifted = (t, to = motion) => t.corners.map((c) => [c[0] + to.x - t.ref.x, c[1] + to.y - t.ref.y]);
+// A track's corners as they would appear in the frame described by `to` (default: now).
+function shifted(t, to = motion.M) {
+  const R = compose(to, invert(t.ref));
+  const cx = video.videoWidth / 2, cy = video.videoHeight / 2;
+  return t.corners.map((c) => { const p = apply(R, [c[0] - cx, c[1] - cy]); return [p[0] + cx, p[1] + cy]; });
+}
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -468,7 +553,7 @@ function sendFrame() {
   const w = Math.round(r.w * scale), h = Math.round(r.h * scale);
   state.scanW = w; state.scanH = h;
   const seq = ++frameSeq;
-  frameRef.set(seq, { x: motion.x, y: motion.y });
+  frameRef.set(seq, { ...motion.M });
   // Confirmed tags and where they should be in this frame, in scan pixels, so the worker
   // can re-check those spots if its full scan misses them.
   const expect = [];
