@@ -8,7 +8,7 @@ const gctx = grab.getContext('2d', { willReadFrequently: true });
 /* ---------- marker sets ---------- */
 
 // OpenCV's DICT_NxN_50/100/250 are the first codes of DICT_NxN_1000; smaller sets
-// leave more room between codes, so the worker can correct more bit errors.
+// leave more room between codes, so fewer random patterns can match one.
 const FAMILIES = [
   { key: '4x4', base: 'ARUCO_4X4_1000', name: 'DICT_4X4', sizes: [50, 100, 250, 1000] },
   { key: '5x5', base: 'ARUCO_5X5_1000', name: 'DICT_5X5', sizes: [50, 100, 250, 1000] },
@@ -31,7 +31,16 @@ const DICT_FILES = {
   APRILTAG_25h9: 'apriltag_25h9',
   APRILTAG_16h5: 'apriltag_16h5',
 };
-const RES_STEPS = [480, 640, 960, 1280];
+const RES_OPTIONS = [[0, 'Full'], [1280, '1280'], [960, '960'], [640, '640']]; // 0 = camera's native size
+const AREA_OPTIONS = [['auto', 'Auto'], ['full', 'Whole frame'], ['center', 'Far only (2×)']];
+
+// A tag is shown only after it is read twice in a row at the same place,
+// which removes nearly all one-frame misreads of textures and text.
+const CONFIRM_HITS = 2;
+// How long a tag survives without a read. It scales with the measured time between
+// passes, so slow phones (or auto mode, where a tag may only be in every other pass)
+// do not drop tags between reads.
+const trackTimeout = () => Math.max(300, state.passGap * (state.area === 'auto' ? 5 : 2.5));
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -41,26 +50,26 @@ const store = {
 const state = {
   family: FAMILIES.find((f) => f.key === store.get('family')) || FAMILIES[0],
   size: +(store.get('size') || 50),
-  res: +(store.get('res') || 640),
-  area: ['full', 'auto', 'center'].includes(store.get('area')) ? store.get('area') : 'auto',
-  flip: false, // in auto mode, alternates full-frame and center passes
+  res: store.get('res2') != null ? +store.get('res2') : 0,
+  area: AREA_OPTIONS.some(([v]) => v === store.get('area')) ? store.get('area') : 'auto',
+  correct: store.get('correct') === '1',
+  showStats: store.get('stats') === '1',
+  flip: false, // in auto mode, alternates whole-frame and center passes
   paused: false,
   busy: false,
   pending: false,
   loopsStarted: false,
   track: null,
-  seen: new Map(), // id -> frames seen
-  tracks: new Map(), // id -> { corners, at } for drawing with smoothing and fade
-  frameTimes: [],
+  tracks: [], // { id, corners, at, born, hits }
+  seen: new Map(), // id -> frames read (confirmed only)
+  detTimes: [],
   lastMs: 0,
+  passGap: 33, // smoothed ms between detection results
 };
+if (state.family.sizes && !state.family.sizes.includes(state.size)) state.size = state.family.sizes[0];
 
-function setKey(f = state.family, size = state.size) {
-  return f.sizes ? `${f.base}:${size}` : f.base;
-}
-function setLabel(f = state.family, size = state.size) {
-  return f.sizes ? `${f.name}_${size}` : f.name;
-}
+const setKey = (f = state.family, size = state.size) => (f.sizes ? `${f.base}:${size}` : f.base);
+const setLabel = (f = state.family, size = state.size) => (f.sizes ? `${f.name}_${size}` : f.name);
 
 // Same ID always gets the same colour, so you can follow a tag across frames.
 const hue = (id) => (id * 137.508 + 200) % 360;
@@ -80,7 +89,7 @@ async function startCamera() {
         facingMode: { ideal: 'environment' },
         width: { ideal: 1920 },
         height: { ideal: 1080 },
-        frameRate: { ideal: 60 },
+        frameRate: { ideal: 30 },
       },
     });
     video.srcObject = stream;
@@ -89,7 +98,8 @@ async function startCamera() {
     setupTrackControls();
     $('gate').hidden = true;
     $('top').hidden = false;
-    $('panel').hidden = false;
+    $('bottom').hidden = false;
+    $('stat').hidden = !state.showStats;
     requestWakeLock();
     startLoops();
   } catch (e) {
@@ -144,8 +154,7 @@ async function restartCamera() {
 
 const worker = new Worker('worker.js');
 
-// The part of the video frame being scanned, in video pixels. The center crop is a
-// 2x digital zoom at the same cost, which is what reads small or distant tags.
+// The part of the video frame being scanned, in video pixels.
 function scanRect(vw, vh, center) {
   if (!center) return { x: 0, y: 0, w: vw, h: vh };
   const w = Math.round(vw * 0.5), h = Math.round(vh * 0.5);
@@ -157,15 +166,17 @@ function sendFrame() {
   if (!vw || video.readyState < 2) return;
   state.flip = !state.flip;
   const center = state.area === 'center' || (state.area === 'auto' && state.flip);
+  const full = state.res ? Math.min(1, state.res / Math.max(vw, vh)) : 1;
+  // The center pass upsamples 2x: same pixel budget as a whole-frame pass, double the reach.
+  const scale = center ? Math.min(2, full * 2) : full;
   const r = scanRect(vw, vh, center);
-  const scale = Math.min(1, state.res / Math.max(r.w, r.h));
   const w = Math.round(r.w * scale), h = Math.round(r.h * scale);
   if (grab.width !== w || grab.height !== h) { grab.width = w; grab.height = h; }
   gctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
   const img = gctx.getImageData(0, 0, w, h);
   state.busy = true;
   worker.postMessage(
-    { width: w, height: h, buffer: img.data.buffer, dict: setKey(), roi: { x: r.x, y: r.y, scale } },
+    { width: w, height: h, buffer: img.data.buffer, dict: setKey(), roi: { x: r.x, y: r.y, scale }, correct: state.correct },
     [img.data.buffer],
   );
 }
@@ -178,25 +189,46 @@ worker.onmessage = (e) => {
   if (error) { console.error(error); return; }
   if (state.paused) return;
   const now = performance.now();
-  for (const m of markers) {
-    const t = state.tracks.get(m.id);
-    // Light smoothing kills jitter without visible lag at detection rates.
-    if (t && now - t.at < 150) {
-      t.corners = t.corners.map((p, i) => [p[0] * 0.35 + m.corners[i][0] * 0.65, p[1] * 0.35 + m.corners[i][1] * 0.65]);
-      t.at = now;
-    } else {
-      state.tracks.set(m.id, { corners: m.corners, at: now, born: now });
-    }
-  }
-  updateLists(markers);
+  for (const m of markers) addRead(m, now);
   state.lastMs = ms;
-  const ft = state.frameTimes;
-  ft.push(now);
-  while (ft.length && now - ft[0] > 1000) ft.shift();
+  const dt = state.detTimes;
+  if (dt.length) state.passGap = state.passGap * 0.8 + Math.min(1000, now - dt[dt.length - 1]) * 0.2;
+  dt.push(now);
+  while (dt.length && now - dt[0] > 1000) dt.shift();
 };
 
-// Detection is driven by new camera frames, so each frame is processed at most once
-// and nothing is wasted re-reading a frame the camera has not replaced yet.
+const centroid = (c) => [(c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4, (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4];
+const sideLen = (c) => Math.hypot(c[0][0] - c[2][0], c[0][1] - c[2][1]) / 1.414;
+
+function addRead(m, now) {
+  const [cx, cy] = centroid(m.corners);
+  const reach = Math.max(24, sideLen(m.corners));
+  let best = null, bestD = Infinity;
+  for (const t of state.tracks) {
+    if (t.id !== m.id || now - t.at > trackTimeout()) continue;
+    const [tx, ty] = centroid(t.corners);
+    const d = Math.hypot(tx - cx, ty - cy);
+    if (d < reach && d < bestD) { best = t; bestD = d; }
+  }
+  if (best) {
+    // Light smoothing removes jitter without visible lag.
+    best.corners = best.corners.map((p, i) => [p[0] * 0.3 + m.corners[i][0] * 0.7, p[1] * 0.3 + m.corners[i][1] * 0.7]);
+    best.at = now;
+    best.hits++;
+    if (best.hits === CONFIRM_HITS) best.born = now;
+    if (best.hits >= CONFIRM_HITS) markSeen(m.id);
+  } else {
+    state.tracks.push({ id: m.id, corners: m.corners, at: now, born: now, hits: 1 });
+  }
+}
+
+let seenDirty = true;
+function markSeen(id) {
+  if (!state.seen.has(id)) { seenDirty = true; navigator.vibrate?.(12); }
+  state.seen.set(id, (state.seen.get(id) || 0) + 1);
+}
+
+// Detection follows new camera frames, so each frame is processed at most once.
 // While the worker is busy we only remember that a newer frame is waiting.
 function onVideoFrame() {
   if (state.paused) return;
@@ -220,7 +252,7 @@ function startLoops() {
   }
   const paint = () => {
     draw();
-    if (!state.paused) renderStats();
+    renderReadouts();
     requestAnimationFrame(paint);
   };
   requestAnimationFrame(paint);
@@ -232,7 +264,6 @@ function draw() {
   const dpr = Math.min(devicePixelRatio || 1, 2); // 3x overlays cost fill-rate on big phones for no visible gain
   const cw = Math.round(overlay.clientWidth * dpr), ch = Math.round(overlay.clientHeight * dpr);
   if (overlay.width !== cw || overlay.height !== ch) { overlay.width = cw; overlay.height = ch; }
-  octx.setTransform(1, 0, 0, 1, 0, 0);
   octx.clearRect(0, 0, cw, ch);
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw) return;
@@ -245,11 +276,14 @@ function draw() {
   if (state.area === 'center') drawScanArea(scanRect(vw, vh, true), P, dpr);
 
   const now = performance.now();
-  for (const [id, t] of state.tracks) {
+  const timeout = trackTimeout();
+  state.tracks = state.tracks.filter((t) => state.paused || now - t.at <= timeout);
+  for (const t of state.tracks) {
+    if (t.hits < CONFIRM_HITS) continue;
     const age = now - t.at;
-    if (age > 400) { state.tracks.delete(id); continue; }
-    const alpha = state.paused ? 1 : age < 120 ? 1 : 1 - (age - 120) / 280;
-    drawMarker(id, t.corners.map(P), alpha, dpr, Math.min(1, (now - t.born) / 120));
+    const hold = timeout - 180; // stay solid until the last ~180 ms, then fade
+    const alpha = state.paused || age < hold ? 1 : 1 - (age - hold) / 180;
+    drawMarker(t.id, t.corners.map(P), alpha, dpr, Math.min(1, (now - t.born) / 120));
   }
 }
 
@@ -264,8 +298,7 @@ function drawScanArea(r, P, dpr) {
   octx.strokeStyle = 'rgba(255,255,255,0.9)';
   octx.lineWidth = 3 * dpr;
   octx.lineCap = 'round';
-  const L = Math.min(x1 - x0, y1 - y0) * 0.12;
-  brackets([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], L);
+  brackets([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], Math.min(x1 - x0, y1 - y0) * 0.12);
 }
 
 // Short strokes at each corner of a quad, pointing along its edges.
@@ -283,15 +316,14 @@ function brackets(q, len) {
 }
 
 function drawMarker(id, q, alpha, dpr, grow) {
-  const cx = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4;
-  const cy = (q[0][1] + q[1][1] + q[2][1] + q[3][1]) / 4;
+  const [cx, cy] = centroid(q);
   const side = (Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]) + Math.hypot(q[2][0] - q[1][0], q[2][1] - q[1][1])) / 2;
 
   octx.lineJoin = 'round';
   octx.lineCap = 'round';
+  octx.globalAlpha = alpha;
 
   // Tinted fill + outline on the tag itself.
-  octx.globalAlpha = alpha;
   octx.fillStyle = color(id, 0.28);
   octx.strokeStyle = color(id);
   octx.lineWidth = 3 * dpr;
@@ -302,8 +334,8 @@ function drawMarker(id, q, alpha, dpr, grow) {
   octx.fill();
   octx.stroke();
 
-  // Lock-on brackets just outside the tag; they snap in when a tag is first found.
-  const pad = 1 + 0.18 + (1 - grow) * 0.25;
+  // Lock-on brackets just outside the tag; they snap in when a tag is confirmed.
+  const pad = 1.18 + (1 - grow) * 0.25;
   const outer = q.map((p) => [cx + (p[0] - cx) * pad, cy + (p[1] - cy) * pad]);
   const bl = Math.max(10 * dpr, side * 0.22);
   octx.lineWidth = 7 * dpr;
@@ -325,15 +357,15 @@ function drawMarker(id, q, alpha, dpr, grow) {
   const label = String(id);
   const tw = octx.measureText(label).width;
   const top = Math.min(outer[0][1], outer[1][1], outer[2][1], outer[3][1]);
-  const lx = cx, ly = Math.max(fs, top - fs * 0.75);
+  const ly = Math.max(fs, top - fs * 0.75);
   const padX = fs * 0.35, h = fs * 1.25;
   octx.fillStyle = color(id);
-  roundRect(lx - tw / 2 - padX, ly - h / 2, tw + padX * 2, h, h * 0.25);
+  roundRect(cx - tw / 2 - padX, ly - h / 2, tw + padX * 2, h, h * 0.25);
   octx.fill();
   octx.fillStyle = '#000';
   octx.textAlign = 'center';
   octx.textBaseline = 'middle';
-  octx.fillText(label, lx, ly + fs * 0.04);
+  octx.fillText(label, cx, ly + fs * 0.04);
   octx.globalAlpha = 1;
 }
 
@@ -349,20 +381,16 @@ function roundRect(x, y, w, h, r) {
 
 /* ---------- readouts ---------- */
 
-let lastNowKey = null;
-let seenRenderAt = 0;
-function updateLists(markers) {
-  const ids = [...new Set(markers.map((m) => m.id))].sort((a, b) => a - b);
-  let fresh = false;
-  for (const id of ids) {
-    if (!state.seen.has(id)) fresh = true;
-    state.seen.set(id, (state.seen.get(id) || 0) + 1);
-  }
-  if (fresh) navigator.vibrate?.(12);
+let nowKey = null;
+let seenAt = 0;
+let statAt = 0;
 
+function renderReadouts() {
+  const now = performance.now();
+  const ids = [...new Set(state.tracks.filter((t) => t.hits >= CONFIRM_HITS && now - t.at < trackTimeout() - 100).map((t) => t.id))].sort((a, b) => a - b);
   const key = ids.join(',');
-  if (key !== lastNowKey) {
-    lastNowKey = key;
+  if (key !== nowKey) {
+    nowKey = key;
     const el = $('now');
     el.replaceChildren();
     if (!ids.length) {
@@ -379,19 +407,24 @@ function updateLists(markers) {
       el.append(s);
     }
   }
-  const now = performance.now();
-  if (fresh || (ids.length && now - seenRenderAt > 300)) renderSeen();
+  if (seenDirty || (ids.length && now - seenAt > 400)) renderSeen();
+  if (state.showStats && now - statAt > 250) {
+    statAt = now;
+    $('stat').textContent = `${state.detTimes.length} reads/s · ${state.lastMs.toFixed(1)} ms · ${grab.width}×${grab.height}`;
+  }
+  $('live').classList.toggle('live', !state.paused && state.detTimes.length > 0 && now - state.detTimes[state.detTimes.length - 1] < 500);
 }
 
 function renderSeen() {
-  seenRenderAt = performance.now();
+  seenDirty = false;
+  seenAt = performance.now();
   const el = $('seen');
   el.replaceChildren();
   const rows = [...state.seen.entries()].sort((a, b) => a[0] - b[0]);
   if (!rows.length) {
     const s = document.createElement('span');
-    s.className = 'tag';
-    s.textContent = '—';
+    s.className = 'hint';
+    s.textContent = 'Tags you read collect here';
     el.append(s);
   }
   for (const [id, n] of rows) {
@@ -406,83 +439,74 @@ function renderSeen() {
   }
 }
 
-let statAt = 0;
-function renderStats() {
-  const now = performance.now();
-  if (now - statAt < 250) return;
-  statAt = now;
-  $('stat').textContent = `${state.frameTimes.length} fps · ${state.lastMs.toFixed(1)} ms · ${grab.width}×${grab.height}`;
-  $('live').classList.toggle('live', state.frameTimes.length > 0);
+/* ---------- settings ---------- */
+
+function options(el, list, current, onPick) {
+  el.replaceChildren();
+  for (const [value, label] of list) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.setAttribute('aria-pressed', value === current);
+    b.onclick = () => { onPick(value); renderSettings(); };
+    el.append(b);
+  }
+}
+
+function renderSettings() {
+  options($('family'), FAMILIES.map((f) => [f, f.key]), state.family, (f) => {
+    state.family = f;
+    if (f.sizes && !f.sizes.includes(state.size)) state.size = f.sizes[0];
+    store.set('family', f.key);
+    resetReads();
+  });
+  $('sizeGroup').hidden = !state.family.sizes;
+  options($('size'), (state.family.sizes || []).map((n) => [n, '_' + n]), state.size, (n) => {
+    state.size = n;
+    store.set('size', String(n));
+    resetReads();
+  });
+  options($('resOpts'), RES_OPTIONS, state.res, (v) => { state.res = v; store.set('res2', String(v)); });
+  options($('areaOpts'), AREA_OPTIONS, state.area, (v) => { state.area = v; store.set('area', v); });
+  options($('correctOpts'), [[false, 'Off'], [true, 'On']], state.correct, (v) => {
+    state.correct = v;
+    store.set('correct', v ? '1' : '0');
+  });
+  options($('statOpts'), [[false, 'Hidden'], [true, 'Shown']], state.showStats, (v) => {
+    state.showStats = v;
+    store.set('stats', v ? '1' : '0');
+    $('stat').hidden = !v || $('top').hidden;
+  });
+  $('setName').textContent = setLabel();
+}
+
+function resetReads() {
+  state.tracks = [];
+  state.seen.clear();
+  seenDirty = true;
+}
+
+function openSettings() {
+  renderSettings();
+  $('scrim').hidden = false;
+  $('settings').hidden = false;
+}
+function closeSettings() {
+  $('scrim').hidden = true;
+  $('settings').hidden = true;
 }
 
 /* ---------- controls ---------- */
 
-function renderSetPicker() {
-  const fam = $('family');
-  fam.replaceChildren();
-  for (const f of FAMILIES) {
-    const b = document.createElement('button');
-    b.textContent = f.key;
-    b.setAttribute('aria-pressed', f === state.family);
-    b.onclick = () => {
-      state.family = f;
-      store.set('family', f.key);
-      onSetChange();
-    };
-    fam.append(b);
-  }
-  const size = $('size');
-  size.replaceChildren();
-  size.hidden = !state.family.sizes;
-  for (const n of state.family.sizes || []) {
-    const b = document.createElement('button');
-    b.textContent = '_' + n;
-    b.setAttribute('aria-pressed', n === state.size);
-    b.onclick = () => {
-      state.size = n;
-      store.set('size', String(n));
-      onSetChange();
-    };
-    size.append(b);
-  }
-  $('setName').textContent = setLabel();
-}
-
-function onSetChange() {
-  state.tracks.clear();
-  state.seen.clear();
-  lastNowKey = null;
-  updateLists([]);
-  renderSeen();
-  renderSetPicker();
-}
-
-function renderToolLabels() {
-  $('res').textContent = state.res + 'p';
-  $('area').textContent = { full: 'Full frame', auto: 'Auto range', center: 'Far (2×)' }[state.area];
-}
-
 $('start').onclick = startCamera;
-$('setBtn').onclick = () => {
-  const open = $('sets').hidden;
-  $('sets').hidden = !open;
-  $('setBtn').setAttribute('aria-expanded', open);
-};
-$('area').onclick = () => {
-  const modes = ['auto', 'center', 'full'];
-  state.area = modes[(modes.indexOf(state.area) + 1) % modes.length];
-  store.set('area', state.area);
-  renderToolLabels();
-};
-$('res').onclick = () => {
-  state.res = RES_STEPS[(RES_STEPS.indexOf(state.res) + 1) % RES_STEPS.length];
-  store.set('res', String(state.res));
-  renderToolLabels();
-};
+$('setBtn').onclick = openSettings;
+$('settingsBtn').onclick = openSettings;
+$('settingsDone').onclick = closeSettings;
+$('scrim').onclick = closeSettings;
 $('pause').onclick = (e) => {
   state.paused = !state.paused;
   e.currentTarget.setAttribute('aria-pressed', state.paused);
-  e.currentTarget.textContent = state.paused ? 'Live' : 'Freeze';
+  e.currentTarget.setAttribute('aria-label', state.paused ? 'Resume' : 'Freeze');
+  $('pauseIcon').setAttribute('d', state.paused ? 'M7 4l12 8-12 8z' : 'M8 5v14M16 5v14');
   if (state.paused) video.pause();
   else video.play().catch(() => {});
 };
@@ -501,7 +525,7 @@ $('zoom').oninput = (e) => {
 };
 $('clear').onclick = () => {
   state.seen.clear();
-  renderSeen();
+  seenDirty = true;
 };
 $('copy').onclick = async (e) => {
   const btn = e.currentTarget;
@@ -512,12 +536,12 @@ $('copy').onclick = async (e) => {
     await navigator.clipboard.writeText(text);
     btn.textContent = 'Copied';
   } catch {
-    btn.textContent = text ? 'Copy failed' : 'Nothing yet';
+    btn.textContent = text ? 'Failed' : 'Empty';
   }
   setTimeout(() => (btn.textContent = 'Copy'), 1400);
 };
 
-/* ---------- marker sheet (to test from a second screen) ---------- */
+/* ---------- marker display (to test from a second screen) ---------- */
 
 const genSet = $('genSet');
 for (const f of FAMILIES) {
@@ -562,6 +586,7 @@ async function renderMarker() {
 }
 
 function openSheet() {
+  closeSettings();
   genSet.value = state.family.sizes ? `${state.family.key}|${state.size}` : state.family.key;
   $('sheet').hidden = false;
   renderMarker();
@@ -576,10 +601,7 @@ $('genNext').onclick = () => { $('genId').value = (+$('genId').value || 0) + 1; 
 
 /* ---------- init ---------- */
 
-if (state.family.sizes && !state.family.sizes.includes(state.size)) state.size = state.family.sizes[0];
-renderSetPicker();
-renderToolLabels();
-updateLists([]);
+renderSettings();
 renderSeen();
 
 // Start-screen emblem: a real DICT_4X4 marker, id 0.

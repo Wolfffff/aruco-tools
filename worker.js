@@ -80,34 +80,123 @@ function getDetector(key) {
   }
   const det = new AR.Detector({ dictionaryName: key });
   const n = Math.sqrt(det.dictionary.nBits);
-  const minDist = minDistance(det.dictionary.codeList, n);
-  const correctable = Math.max(0, Math.floor((minDist - 1) / 2));
-  det.dictionary.tau = correctable + 1; // the library accepts distance < tau
+  det.correctable = Math.max(0, Math.floor((minDistance(det.dictionary.codeList, n) - 1) / 2));
   det.pass = 0;
   det.misses = 0;
   detectors[key] = det;
   return det;
 }
 
-function detect(det, image, minFrac) {
+// Decoding works on a perspective-corrected copy of the candidate with whole-pixel
+// cells, sampling only each cell's middle so blur at cell edges does not vote.
+const CELL = 8;
+const MARGIN = 2;
+const MIN_CONTRAST = 45; // grey levels between darkest and brightest pixel in the candidate
+
+function decode(det, candidate, maxErrors) {
+  const n = det.dictionary.markSize; // cells across, black border included
+  const size = n * CELL;
+  const img = CV.warp(det.grey, det.homography, candidate, size);
+  const d = img.data;
+  const len = size * size;
+
+  let lo = 255, hi = 0;
+  for (let i = 0; i < len; i++) { const v = d[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (hi - lo < MIN_CONTRAST) return null;
+  const t = CV.otsu(img);
+
+  const white = (cx, cy) => {
+    let c = 0, tot = 0;
+    for (let y = cy * CELL + MARGIN; y < (cy + 1) * CELL - MARGIN; y++) {
+      for (let x = cx * CELL + MARGIN; x < (cx + 1) * CELL - MARGIN; x++, tot++) if (d[y * size + x] > t) c++;
+    }
+    return c / tot;
+  };
+
+  // The border must be solid black: real tags have it, most random quads do not.
+  let borderWhite = 0, cells = 0;
+  for (let i = 0; i < n; i++) {
+    for (const [cx, cy] of [[i, 0], [i, n - 1], [0, i], [n - 1, i]]) {
+      const w = white(cx, cy);
+      if (w > 0.35) return null;
+      borderWhite += w; cells++;
+    }
+  }
+  if (borderWhite / cells > 0.08) return null;
+
+  // Every data cell has to be clearly black or clearly white.
+  const bits = [];
+  let unsure = 0, ones = 0;
+  for (let y = 1; y < n - 1; y++) {
+    const row = [];
+    for (let x = 1; x < n - 1; x++) {
+      const w = white(x, y);
+      if (w > 0.25 && w < 0.75) unsure++;
+      const b = w >= 0.5 ? 1 : 0;
+      ones += b;
+      row.push(b);
+    }
+    bits.push(row);
+  }
+  if (unsure > maxErrors) return null;
+  if (ones === 0) return null; // an all-black square is not a tag
+
+  let best = null, rot = 0, cur = bits;
+  for (let r = 0; r < 4; r++) {
+    const f = det.dictionary.find(cur);
+    if (f && f.distance + unsure <= maxErrors && (!best || f.distance < best.distance)) {
+      best = f; rot = r;
+      if (f.distance === 0) break;
+    }
+    cur = det.rotate(cur);
+  }
+  if (!best) return null;
+  return { id: best.id, corners: det.rotate2(candidate, 4 - rot), err: best.distance };
+}
+
+// Reject quads that are tiny or very skewed: they decode badly and cause most false reads.
+function plausible(q) {
+  let min = Infinity, max = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4];
+    const l = Math.hypot(a.x - b.x, a.y - b.y);
+    if (l < min) min = l;
+    if (l > max) max = l;
+  }
+  return min >= 10 && max / min < 3.5;
+}
+
+function detect(det, image, maxErrors) {
   const p = PASSES[det.pass];
   CV.grayscale(image, det.grey);
   CV.adaptiveThreshold(det.grey, det.thres, p.kernel, p.thresh);
   det.contours = CV.findContours(det.thres, det.binary);
-  let cands = det.findCandidates(det.contours, image.width * minFrac, 0.05, 6);
-  cands = det.clockwiseCorners(cands);
+  let cands = det.findCandidates(det.contours, image.width * 0.01, 0.05, 10);
+  cands = det.clockwiseCorners(cands).filter(plausible);
   cands = det.notTooNear(cands, 6);
-  return det.findMarkers(det.grey, cands, Math.max(49, det.dictionary.markSize * 10));
+  det.dictionary.tau = maxErrors + 1; // dictionary.find accepts distance < tau
+  const out = [];
+  for (const c of cands) {
+    const m = decode(det, c, maxErrors);
+    if (!m) continue;
+    // One physical tag can yield nested contours; keep one read per tag, but allow
+    // several printed copies of the same ID in view.
+    const cx = (m.corners[0].x + m.corners[2].x) / 2, cy = (m.corners[0].y + m.corners[2].y) / 2;
+    const dup = out.some((o) => o.id === m.id && Math.hypot(o.cx - cx, o.cy - cy) < Math.hypot(m.corners[0].x - m.corners[2].x, m.corners[0].y - m.corners[2].y) / 2);
+    if (!dup) out.push(Object.assign(m, { cx, cy }));
+  }
+  return out;
 }
 
 onmessage = (e) => {
-  const { width, height, buffer, dict, roi } = e.data;
+  const { width, height, buffer, dict, roi, correct } = e.data;
   const t0 = performance.now();
   let markers = [];
   let error = null;
   try {
     const det = getDetector(dict);
-    const found = detect(det, { width, height, data: new Uint8ClampedArray(buffer) }, 0.01);
+    const maxErrors = correct ? det.correctable : 0;
+    const found = detect(det, { width, height, data: new Uint8ClampedArray(buffer) }, maxErrors);
     // Stick with a threshold setting while it works; rotate through the others when it doesn't.
     if (found.length) det.misses = 0;
     else if (++det.misses >= 2) { det.pass = (det.pass + 1) % PASSES.length; det.misses = 0; }
@@ -115,7 +204,7 @@ onmessage = (e) => {
     markers = found.map((m) => ({
       id: m.id,
       corners: m.corners.map((c) => [c.x / s + ox, c.y / s + oy]),
-      err: m.hammingDistance,
+      err: m.err,
     }));
   } catch (err) {
     error = String(err);
