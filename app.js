@@ -1143,8 +1143,10 @@ $('settingsDone').onclick = closeSettings;
 $('scrim').onclick = closeSettings;
 // Tap the picture to freeze it (to read IDs at leisure); tap again to resume. A pinch is
 // not a tap, so zooming never freezes.
-// Each time the camera opens, say how to pause.
+// The first time the camera opens on this phone, say how to pause.
 function showTapHint() {
+  if (store.get('tapHintSeen')) return;
+  store.set('tapHintSeen', '1');
   $('tapHint').hidden = false;
   setTimeout(() => ($('tapHint').hidden = true), 2500);
 }
