@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ArUco">
+<meta name="theme-color" content="#000000">
+<title>ArUco Reader</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.webmanifest">
+<style>
+  :root {
+    --bg: #000;
+    --glass: rgba(18, 18, 20, 0.78);
+    --hair: rgba(255, 255, 255, 0.14);
+    --fg: #fff;
+    --dim: #8e8e93;
+    --on: #2f6bff;
+    --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+    --sans: -apple-system, system-ui, "Roboto", "Helvetica Neue", sans-serif;
+    --sl: max(12px, env(safe-area-inset-left, 0px));
+    --sr: max(12px, env(safe-area-inset-right, 0px));
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.35 var(--sans); overflow: hidden; -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
+  button, select, input { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--on); outline-offset: 2px; }
+
+  #stage { position: fixed; inset: 0; }
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+  /* top strip */
+  .top {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 2;
+    display: flex; align-items: center; gap: 8px;
+    padding: calc(env(safe-area-inset-top, 0px) + 8px) var(--sr) 8px var(--sl);
+  }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+    background: var(--glass); border: 1px solid var(--hair); border-radius: 17px;
+    -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  }
+  .top .set { font: 600 13px var(--mono); letter-spacing: 0.02em; }
+  .top .stat { margin-left: auto; font: 12px var(--mono); color: var(--dim); font-variant-numeric: tabular-nums; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .dot.live { background: #30d158; }
+
+  /* bottom panel */
+  .panel {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 2;
+    padding: 12px var(--sr) calc(env(safe-area-inset-bottom, 0px) + 12px) var(--sl);
+    background: var(--glass); border-top: 1px solid var(--hair);
+    -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px);
+    display: grid; gap: 12px;
+  }
+  .readout { display: flex; align-items: baseline; gap: 10px; min-height: 40px; min-width: 0; }
+  .readout .ids { display: flex; gap: 14px; overflow-x: auto; scrollbar-width: none; min-width: 0; }
+  .readout .ids::-webkit-scrollbar { display: none; }
+  .readout .id { font: 700 34px/1 var(--mono); font-variant-numeric: tabular-nums; flex: none; }
+  .readout .none { color: var(--dim); font-size: 15px; align-self: center; }
+
+  .seen { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .seen .lab { font: 600 11px var(--sans); letter-spacing: 0.06em; text-transform: uppercase; color: var(--dim); flex: none; margin-right: 2px; }
+  .seen .list { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; min-width: 0; flex: 1; }
+  .seen .list::-webkit-scrollbar { display: none; }
+  .tag { flex: none; font: 600 13px/1 var(--mono); padding: 6px 8px; border-radius: 6px; background: rgba(255,255,255,0.08); box-shadow: inset 3px 0 0 var(--c, var(--dim)); font-variant-numeric: tabular-nums; }
+  .tag b { font-weight: 400; color: var(--dim); margin-left: 5px; }
+
+  .seg { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; min-width: 0; }
+  .seg::-webkit-scrollbar { display: none; }
+  .seg button {
+    flex: none; height: 34px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--hair);
+    background: rgba(255,255,255,0.06); font: 600 13px var(--mono);
+  }
+  .seg button[aria-pressed="true"] { background: var(--fg); color: #000; border-color: var(--fg); }
+
+  .top .set { cursor: pointer; }
+  .caret { color: var(--dim); font-size: 11px; }
+  .sets { display: grid; gap: 8px; }
+  .tools { display: flex; gap: 6px; align-items: center; overflow-x: auto; scrollbar-width: none; }
+  .tools::-webkit-scrollbar { display: none; }
+  .tools button { flex: none; }
+  .tools button {
+    height: 34px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--hair); background: transparent; font-size: 13px; font-weight: 600;
+  }
+  .tools button[aria-pressed="true"] { background: var(--on); border-color: var(--on); }
+  .zoom { display: flex; align-items: center; gap: 8px; flex: none; width: 150px; }
+  .zoom span { font: 12px var(--mono); color: var(--dim); width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+  .zoom input { flex: 1; accent-color: var(--fg); }
+
+  /* start screen */
+  .gate {
+    position: fixed; inset: 0; z-index: 3; display: grid; align-content: center; justify-items: start; gap: 18px;
+    padding: 24px var(--sr) 24px var(--sl); background: var(--bg);
+  }
+  .gate .inner { width: 100%; max-width: 380px; margin: 0 auto; display: grid; gap: 18px; }
+  .gate h1 { margin: 0; font: 800 34px/1.05 var(--sans); letter-spacing: -0.02em; }
+  .gate p { margin: 0; color: var(--dim); max-width: 34ch; }
+  .go { height: 52px; border: 0; border-radius: 14px; background: var(--fg); color: #000; font-weight: 700; font-size: 17px; }
+  .ghost { height: 44px; border: 1px solid var(--hair); border-radius: 14px; background: transparent; font-weight: 600; }
+  .err { color: #ff6961; font-size: 14px; }
+  .mark { width: 96px; height: 96px; display: grid; grid-template-columns: repeat(6, 1fr); border: 8px solid #fff; }
+  .mark i { background: #000; }
+  .mark i.w { background: #fff; }
+
+  /* marker sheet */
+  .sheet { position: fixed; inset: 0; z-index: 4; background: #fff; color: #000; display: grid; grid-template-rows: auto 1fr; }
+  .sheet header {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: calc(env(safe-area-inset-top, 0px) + 10px) var(--sr) 10px var(--sl); background: #000; color: #fff;
+  }
+  .sheet select, .sheet input, .sheet header button { height: 36px; border-radius: 9px; border: 1px solid var(--hair); background: rgba(255,255,255,0.08); padding: 0 10px; }
+  .sheet input { width: 80px; font-family: var(--mono); }
+  .sheet .done { margin-left: auto; background: #fff !important; color: #000; font-weight: 700; }
+  .sheet .body { display: grid; place-items: center; padding: 20px; min-height: 0; }
+  #markerSvg svg { width: min(80vw, 64vh); height: auto; display: block; }
+  #markerCaption { font: 600 15px var(--mono); text-align: center; margin-top: 12px; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<div class="top" id="top" hidden>
+  <button class="pill set" id="setBtn" aria-expanded="false" aria-controls="sets"><span class="dot" id="live"></span><span id="setName">DICT_4X4_50</span><span class="caret">▾</span></button>
+  <span class="pill stat" id="stat">–</span>
+</div>
+
+<div class="panel" id="panel" hidden>
+  <div class="readout"><div class="ids" id="now"></div></div>
+  <div class="seen"><span class="lab">Seen</span><div class="list" id="seen"></div></div>
+  <div class="sets" id="sets" hidden>
+    <div class="seg" id="family" role="group" aria-label="Marker family"></div>
+    <div class="seg" id="size" role="group" aria-label="Set size"></div>
+  </div>
+  <div class="tools">
+    <button id="area">Auto range</button>
+    <button id="res">640</button>
+    <button id="torch" hidden aria-pressed="false">Light</button>
+    <button id="pause" aria-pressed="false">Freeze</button>
+    <button id="copy">Copy</button>
+    <button id="clear">Clear</button>
+    <button id="showMarker">Marker</button>
+    <label class="zoom" id="zoomWrap" hidden><input id="zoom" type="range" step="0.1" aria-label="Zoom"><span id="zoomVal">1×</span></label>
+  </div>
+</div>
+
+<div class="gate" id="gate">
+  <div class="inner">
+    <div class="mark" id="mark" aria-hidden="true"></div>
+    <h1>ArUco Reader</h1>
+    <p>Live ArUco and AprilTag detection. Runs entirely on your phone.</p>
+    <button class="go" id="start">Open camera</button>
+    <button class="ghost" id="gateMarker">Show a marker</button>
+    <div class="err" id="err" hidden></div>
+  </div>
+</div>
+
+<div class="sheet" id="sheet" hidden>
+  <header>
+    <select id="genSet" aria-label="Marker set"></select>
+    <input id="genId" type="number" min="0" value="0" inputmode="numeric" aria-label="Marker ID">
+    <button id="genPrev" aria-label="Previous ID">−</button>
+    <button id="genNext" aria-label="Next ID">+</button>
+    <button class="done" id="genClose">Done</button>
+  </header>
+  <div class="body"><div><div id="markerSvg"></div><div id="markerCaption"></div></div></div>
+</div>
+
+<script src="vendor/cv.js"></script>
+<script src="vendor/aruco.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
