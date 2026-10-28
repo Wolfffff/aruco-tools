@@ -37,7 +37,8 @@ const DICT_FILES = {
 };
 // Pixel budget per detection pass: the longest side of the frame handed to the detector.
 // The 2x center pass gets the same budget, so with a 4K camera it reads native pixels.
-const SPEED_OPTIONS = [[960, 'Fast'], [1920, 'Max detail']];
+// 0 = native: every camera pixel, no downscaling.
+const SPEED_OPTIONS = [[640, '640'], [960, '960'], [1280, '1280'], [1920, '1920'], [0, 'Native']];
 const CAMERA_OPTIONS = [['1080', '1080p'], ['4k', '4K']];
 const CAMERA_SIZES = { '1080': [1920, 1080], '4k': [3840, 2160] };
 const AREA_OPTIONS = [['auto', 'Auto'], ['full', 'Whole frame'], ['center', 'Far only (2×)']];
@@ -57,7 +58,7 @@ const store = {
 const state = {
   family: FAMILIES.find((f) => f.key === store.get('family')) || FAMILIES[0],
   size: +(store.get('size') || 50),
-  res: store.get('speed') === '1920' || store.get('speed') === '0' ? 1920 : 960,
+  res: SPEED_OPTIONS.some(([v]) => String(v) === store.get('speed')) ? +store.get('speed') : 960,
   cam: store.get('cam') === '4k' ? '4k' : '1080',
   area: AREA_OPTIONS.some(([v]) => v === store.get('area')) ? store.get('area') : 'auto',
   correct: store.get('correct') === '1',
@@ -74,6 +75,7 @@ const state = {
   shown: null, // the analyzed frame on screen: { canvas, s, vw, vh }
   inflight: null, // the frame the worker is analyzing now
   seen: new Map(), // id -> frames read (confirmed only)
+  entered: new Map(), // id -> when it last came into view; orders the list, newest first
   detTimes: [],
   lastMs: 0,
   passGap: 33, // smoothed ms between detection results
@@ -123,6 +125,7 @@ async function startCamera() {
     $('stat').hidden = !state.showStats;
     requestWakeLock();
     startLoops();
+    upgradeResolution(state.track);
   } catch (e) {
     btn.disabled = false;
     btn.textContent = 'Open camera';
@@ -130,6 +133,36 @@ async function startCamera() {
       ? 'Camera access was denied. Allow it for this site in your browser settings and reload.'
       : 'Could not open the camera: ' + (e.message || e.name));
   }
+}
+
+// iOS in particular may answer a 1080p or 4K request with a smaller stream, depending on
+// how the request is shaped. If that happens, ask again in other ways and keep the best.
+async function upgradeResolution(track) {
+  const [W, H] = CAMERA_SIZES[state.cam];
+  const longSide = () => { const st = track.getSettings?.() || {}; return Math.max(st.width || 0, st.height || 0); };
+  const settle = () => new Promise((r) => setTimeout(r, 400));
+  let best = longSide(), bestAsk = null;
+  if (!best || best >= W * 0.9) return;
+  const asks = [
+    { width: { ideal: H }, height: { ideal: W } }, // the same size, asked portrait-first
+    { width: { ideal: W } },
+    { height: { ideal: W } },
+    { width: { min: Math.round(W * 0.66), ideal: W } },
+  ];
+  for (const ask of asks) {
+    if (state.track !== track) return; // the camera was switched meanwhile
+    try { await track.applyConstraints({ ...ask, frameRate: { ideal: 30 } }); } catch { continue; }
+    await settle();
+    const got = longSide();
+    if (got > best) { best = got; bestAsk = ask; }
+    if (got >= W * 0.9) break;
+  }
+  // The last attempt may have been a worse one; settle on the best that worked.
+  if (state.track === track && bestAsk && longSide() < best) {
+    await track.applyConstraints({ ...bestAsk, frameRate: { ideal: 30 } }).catch(() => {});
+  }
+  state.tracks = []; // positions may now be in a different stream size
+  if (!$('settings').hidden) renderSettings();
 }
 
 // Resolves once a frame with real dimensions has been presented (or after 2 s, as a fallback).
@@ -258,7 +291,8 @@ function sendFrame() {
   // Every pass gets the same pixel budget. Crops (the center pass, digital zoom) therefore
   // read native pixels, and may upsample up to 2x so tiny tags have cells big enough to read.
   const cropped = center || digitalZoom() > 1;
-  const scale = Math.min(cropped ? 2 : 1, state.res / Math.max(r.w, r.h));
+  const budget = state.res || Math.max(r.w, r.h); // native: one detector pixel per camera pixel
+  const scale = Math.min(cropped && state.res ? 2 : 1, budget / Math.max(r.w, r.h));
   const w = Math.round(r.w * scale), h = Math.round(r.h * scale);
   if (grab.width !== w || grab.height !== h) { grab.width = w; grab.height = h; }
   gctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
@@ -488,6 +522,7 @@ function roundRect(x, y, w, h, r) {
 let statAt = 0;
 let seenAt = 0;
 let inViewKey = '';
+let lastInView = new Set();
 
 // Tiny drawings of tags for the list, from the same dictionary the detector uses.
 const miniCache = new Map(); // `${setKey}:${id}` -> svg markup
@@ -514,13 +549,16 @@ function renderReadouts() {
   const now = performance.now();
   const inView = new Set(visibleTracks().map((t) => t.id));
   const key = [...inView].sort((a, b) => a - b).join(',');
+  // A tag moves to the front when it comes into view, and stays put while it is in view.
+  for (const id of inView) if (!lastInView.has(id)) state.entered.set(id, now);
+  lastInView = inView;
   if (seenDirty || key !== inViewKey || (inView.size && now - seenAt > 400)) {
     inViewKey = key;
     renderSeen(inView);
   }
   if (state.showStats && now - statAt > 250) {
     statAt = now;
-    $('stat').textContent = `${state.detTimes.length} reads/s · ${state.lastMs.toFixed(1)} ms · ${grab.width}×${grab.height}`;
+    $('stat').textContent = `${state.detTimes.length} reads/s · ${state.lastMs.toFixed(1)} ms · camera ${video.videoWidth}×${video.videoHeight} · scan ${grab.width}×${grab.height}`;
   }
   $('live').classList.toggle('live', !state.paused && state.detTimes.length > 0 && now - state.detTimes[state.detTimes.length - 1] < 500);
 }
@@ -533,7 +571,7 @@ function renderSeen(inView = new Set()) {
   seenAt = performance.now();
   ensureMiniDict();
   const list = $('seen');
-  const ids = [...state.seen.keys()].sort((a, b) => a - b);
+  const ids = [...state.seen.keys()].sort((a, b) => (state.entered.get(b) || 0) - (state.entered.get(a) || 0));
   $('seenCount').textContent = ids.length ? `${ids.length} tag${ids.length === 1 ? '' : 's'} read` : 'No tags yet';
   $('emptyHint').hidden = ids.length > 0;
   for (const [id, el] of cards) if (!state.seen.has(id)) { el.remove(); cards.delete(id); }
@@ -609,6 +647,7 @@ function renderSettings() {
 
 function resetReads() {
   state.tracks = [];
+  state.entered.clear();
   viewDirty = true;
   state.seen.clear();
   seenDirty = true;

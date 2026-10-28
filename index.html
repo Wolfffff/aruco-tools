@@ -201,16 +201,16 @@
   </div>
   <p class="dictname" id="dictName"></p>
   <div class="group">
-    <h3>Speed</h3>
+    <h3>Scan size</h3>
     <div class="opts" id="speedOpts"></div>
-    <p>Max detail reads smaller, farther tags but uses more battery.</p>
+    <p>Longest side, in pixels, of the image the detector reads each frame. Bigger reads smaller, farther tags but takes longer per frame and uses more battery.</p>
   </div>
   <details class="more">
     <summary>More</summary>
     <div class="group">
       <h3>Camera</h3>
       <div class="opts" id="camOpts"></div>
-      <p>4K roughly doubles how far Max detail reads, at the same speed per pass, but the phone runs warmer. <span id="camNow"></span></p>
+      <p>4K gives the larger scan sizes real detail to work with, so tags read from farther away. The phone runs warmer. <span id="camNow"></span></p>
     </div>
     <div class="group">
       <h3>Range</h3>
@@ -258,6 +258,6 @@
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="app.js?v=8"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>
