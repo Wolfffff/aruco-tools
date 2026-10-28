@@ -12,7 +12,7 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="ui.css?v=27">
+<link rel="stylesheet" href="ui.css?v=28">
 <style>
   /* Reader page. Shared tokens and components live in ui.css. */
   html, body { height: 100%; overflow: hidden; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
@@ -52,7 +52,8 @@
   .frozen svg { width: 12px; height: 12px; }
   #stage::after { content: ""; position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 0 3px #fff; opacity: 0; transition: opacity 120ms; }
   body.paused #stage::after { opacity: 1; }
-  .taphint { animation: fade-in 200ms ease-out; }
+  .taphint, .copyhint { animation: fade-in 200ms ease-out; }
+  .copyhint { bottom: calc(var(--panel-h, 140px) + 14px); }
   .notice { position: fixed; z-index: 4; left: var(--sl); right: var(--sr); bottom: calc(var(--panel-h, 140px) + 14px); padding: 12px 14px; border-radius: var(--r-s); font: 500 15px/1.35 var(--font); }
 
   /* ---- tag strip along the bottom ---- */
@@ -75,6 +76,10 @@
     transition: border-color 150ms, background-color 150ms;
   }
   .card.live { border-color: var(--c); background: color-mix(in srgb, var(--c) 14%, var(--bg)); }
+  /* Cards are buttons: tap to copy the ID. */
+  button.card { font: inherit; color: var(--fg); text-align: left; cursor: pointer; transition: transform 80ms ease-out, border-color 150ms, background-color 150ms; }
+  button.card:active { transform: scale(0.96); }
+  .card.copied small { color: var(--fg); }
   .card .mini { width: 38px; height: 38px; flex: none; border-radius: 3px; overflow: hidden; }
   .card .mini svg { width: 100%; height: 100%; display: block; shape-rendering: crispEdges; }
   .card .meta { display: grid; line-height: 1.1; font-variant-numeric: tabular-nums; }
@@ -154,6 +159,7 @@
 <div class="pill zoomhint glass" id="zoomHint" aria-live="polite"></div>
 <div class="pill frozen glass" id="frozen" hidden role="status"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 2v8M8.5 2v8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>Paused</div>
 <div class="pill taphint glass" id="tapHint" hidden>Tap to pause</div>
+<div class="pill copyhint glass" id="copyHint" hidden>Tap a marker to copy its ID</div>
 <div class="notice glass" id="notice" hidden role="alert"></div>
 
 <div class="bottom" id="bottom" hidden>
@@ -246,7 +252,7 @@
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="markers.js?v=27"></script>
-<script src="app.js?v=27"></script>
+<script src="markers.js?v=28"></script>
+<script src="app.js?v=28"></script>
 </body>
 </html>

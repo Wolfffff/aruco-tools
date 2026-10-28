@@ -27,7 +27,7 @@ Phone-first ArUco / AprilTag tools. Static site, no build step, nothing leaves t
 - Optional 4K camera stream (Settings → More → Camera): same cost per pass, the center pass reads native pixels for roughly double the range
 - Tolerates a few blurred cells while still requiring an exact code match
 - Adaptive thresholding that cycles settings when nothing is found (dim light, big tags)
-- Tap the picture to freeze it, tap again to resume
+- Tap the picture to pause it, tap again to resume; tap a marker in the list to copy its ID
 - Pinch to zoom: uses the camera's zoom where available, otherwise a digital zoom that also points detection at what you see
 - Bottom list shows a mini drawing of each tag read, its ID, and how many times it was read; tags in view are ringed
 - Uses the plain wide back lens instead of iPhone's combined camera, which hops between lenses while focusing (a visible jump); other lenses selectable in Settings → More

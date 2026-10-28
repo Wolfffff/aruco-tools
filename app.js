@@ -1026,8 +1026,11 @@ function renderSeen(inView = new Set()) {
   for (const id of ids) {
     let el = cards.get(id);
     if (!el) {
-      el = document.createElement('div');
+      el = document.createElement('button');
+      el.type = 'button';
       el.className = 'card';
+      el.setAttribute('aria-label', `Copy ID ${id}`);
+      el.onclick = () => copyId(id, el);
       el.style.setProperty('--c', color(id));
       el.innerHTML = '<span class="mini"></span><span class="meta"><b></b><small></small></span>';
       el.querySelector('b').textContent = id;
@@ -1036,16 +1039,41 @@ function renderSeen(inView = new Set()) {
       el.classList.add('new');
       el.addEventListener('animationend', () => el.classList.remove('new'), { once: true });
       cards.set(id, el);
+      showCopyHint();
     }
     if (!el.mini.firstChild) el.mini.innerHTML = miniSvg(id);
     const n = state.seen.get(id);
-    if (el.shownCount !== n) { el.shownCount = n; el.count.textContent = `${n} read${n === 1 ? '' : 's'}`; }
+    if (el.shownCount !== n && !el.flash) { el.shownCount = n; el.count.textContent = `${n} read${n === 1 ? '' : 's'}`; }
     el.classList.toggle('live', inView.has(id));
     // Keep DOM order sorted without re-inserting cards that are already in place.
     const want = prev ? prev.nextSibling : list.firstChild;
     if (want !== el) list.insertBefore(el, want);
     prev = el;
   }
+}
+
+// Tap a card to copy that marker's ID; the card says so in place of its read count.
+async function copyId(id, el) {
+  let msg = 'Copied';
+  try { await navigator.clipboard.writeText(String(id)); } catch { msg = 'Copy failed'; }
+  clearTimeout(el.flash);
+  el.count.textContent = msg;
+  el.classList.add('copied');
+  el.flash = setTimeout(() => {
+    el.flash = 0;
+    el.classList.remove('copied');
+    el.shownCount = null; // let the next render restore the read count
+    seenDirty = true;
+  }, 1200);
+  $('copyHint').hidden = true;
+}
+
+// The first time a marker appears in the list on this phone, say it can be copied.
+function showCopyHint() {
+  if (store.get('copyHintSeen')) return;
+  store.set('copyHintSeen', '1');
+  $('copyHint').hidden = false;
+  setTimeout(() => ($('copyHint').hidden = true), 3500);
 }
 
 /* ---------- settings ---------- */
