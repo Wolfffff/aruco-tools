@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Reader Speed Test</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #000; --panel: #1c1c1e; --hair: rgba(255,255,255,0.12); --fg: #fff; --dim: #8e8e93; --good: #30d158; --warn: #ff9f0a;
+    --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+    --sans: -apple-system, system-ui, "Roboto", "Helvetica Neue", sans-serif;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 var(--sans); }
+  main { max-width: 560px; margin: 0 auto; padding: calc(env(safe-area-inset-top, 0px) + 20px) max(16px, env(safe-area-inset-right, 0px)) 32px max(16px, env(safe-area-inset-left, 0px)); display: grid; gap: 16px; }
+  header { display: flex; align-items: center; gap: 12px; }
+  h1 { margin: 0; font: 800 24px var(--sans); flex: 1; }
+  a { color: var(--fg); }
+  header a { font: 600 13px var(--sans); text-decoration: none; border: 1px solid var(--hair); border-radius: 9px; padding: 7px 12px; }
+  p { margin: 0; color: var(--dim); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button { height: 44px; padding: 0 18px; border-radius: 12px; border: 0; font: 700 16px var(--sans); cursor: pointer; }
+  .go { background: var(--fg); color: #000; }
+  .ghost { background: transparent; color: var(--fg); border: 1px solid var(--hair); }
+  button:disabled { opacity: 0.5; }
+  .wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font: 14px var(--mono); font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 8px 6px; border-bottom: 1px solid var(--hair); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--dim); font: 600 11px var(--sans); letter-spacing: 0.06em; text-transform: uppercase; }
+  .ok { color: var(--good); } .slow { color: var(--warn); }
+  #status { font: 13px var(--mono); color: var(--dim); min-height: 1.4em; }
+  pre { margin: 0; padding: 12px; background: var(--panel); border-radius: 10px; font: 12px var(--mono); white-space: pre-wrap; color: var(--dim); }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Speed test</h1><a href="./">Open reader</a></header>
+  <p>Runs the reader's real detector on generated frames with six tags and background clutter, at each scan size, then with several workers in parallel. Takes about 20 seconds. Keep this tab in front.</p>
+  <div class="row">
+    <button class="go" id="run">Run speed test</button>
+    <button class="ghost" id="copy" disabled>Copy results</button>
+  </div>
+  <div id="status"></div>
+  <div class="wrap"><table id="sizes" hidden>
+    <thead><tr><th>Scan size</th><th>ms / frame</th><th>Tags found</th><th>Reads / s, 1 worker</th></tr></thead><tbody></tbody>
+  </table></div>
+  <div class="wrap"><table id="pool" hidden>
+    <thead><tr><th>Workers</th><th>Reads / s at 960</th><th>vs 1 worker</th></tr></thead><tbody></tbody>
+  </table></div>
+  <pre id="summary" hidden></pre>
+</main>
+
+<script src="vendor/cv.js"></script>
+<script src="vendor/aruco.js"></script>
+<script src="vendor/dictionaries/aruco_4x4_1000.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const SIZES = [640, 960, 1280, 1920];
+const IDS = [3, 8, 15, 21, 30, 42];
+const CAMERA_FPS = 30;
+
+function makeTags() {
+  const def = AR.DICTIONARIES.ARUCO_4X4_1000, saved = def.tau;
+  def.tau = 1; // skip the library's slow distance scan; drawing does not need it
+  const dict = new AR.Dictionary('ARUCO_4X4_1000');
+  def.tau = saved;
+  return Promise.all(IDS.map((id) => new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.src = 'data:image/svg+xml,' + encodeURIComponent(dict.generateSVG(id));
+  })));
+}
+
+// A portrait frame with the long side `long`: clutter, text and six tilted tags.
+function frame(tags, long) {
+  const W = Math.round(long * 9 / 16), H = long;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x = c.getContext('2d', { willReadFrequently: true });
+  let seed = 7; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#555'); g.addColorStop(1, '#bbb');
+  x.fillStyle = g; x.fillRect(0, 0, W, H);
+  for (let i = 0; i < 160; i++) {
+    x.setTransform(1, 0, 0, 1, rnd() * W, rnd() * H); x.rotate(rnd() * 6.3);
+    const s = (8 + rnd() * 50) * W / 540; x.fillStyle = rnd() < 0.5 ? '#222' : '#eee'; x.fillRect(-s / 2, -s / 2, s, s * (0.3 + rnd()));
+  }
+  x.setTransform(1, 0, 0, 1, 0, 0); x.fillStyle = '#111'; x.font = `${12 * W / 540}px sans-serif`;
+  for (let i = 0; i < 25; i++) x.fillText('The quick brown fox 0123', rnd() * W, rnd() * H);
+  x.filter = 'blur(0.6px)';
+  tags.forEach((t, k) => {
+    x.setTransform(1, 0.12 * (rnd() - 0.5), 0.2 * (rnd() - 0.5), 1, W * (0.28 + 0.44 * (k % 2)), H * (0.2 + 0.3 * (k >> 1)));
+    x.rotate(rnd() * 6.3); const s = W * 0.2; x.drawImage(t, -s / 2, -s / 2, s, s);
+  });
+  x.setTransform(1, 0, 0, 1, 0, 0); x.filter = 'none';
+  return x.getImageData(0, 0, W, H);
+}
+
+function newWorker() {
+  return new Worker('worker.js?bench=' + Date.now());
+}
+
+function read(worker, img) {
+  return new Promise((resolve) => {
+    const copy = new Uint8ClampedArray(img.data);
+    worker.onmessage = (e) => { if (!e.data.warm) resolve(e.data); };
+    worker.postMessage({ width: img.width, height: img.height, buffer: copy.buffer, dict: 'ARUCO_4X4_1000:50', roi: null, correct: false }, [copy.buffer]);
+  });
+}
+
+const status = (t) => { $('status').textContent = t; };
+const pause = () => new Promise((r) => setTimeout(r, 0));
+let results = null;
+
+async function run() {
+  $('run').disabled = true; $('copy').disabled = true;
+  results = { device: navigator.userAgent, cores: navigator.hardwareConcurrency || '?', sizes: [], pool: [] };
+  const tags = await makeTags();
+  const w = newWorker();
+  const tbody = $('sizes').querySelector('tbody'); tbody.replaceChildren(); $('sizes').hidden = false;
+  let img960 = null;
+  for (const long of SIZES) {
+    status(`Reading ${long} px frames…`); await pause();
+    const img = frame(tags, long);
+    if (long === 960) img960 = img;
+    await read(w, img); await read(w, img); // warm up the JIT and buffers
+    const runs = 12; let ms = 0, found = 0;
+    for (let i = 0; i < runs; i++) { const r = await read(w, img); ms += r.ms; found += r.markers.length; }
+    const per = ms / runs, rps = Math.min(CAMERA_FPS, 1000 / per);
+    results.sizes.push({ long, ms: +per.toFixed(1), found: found / runs, rps: +rps.toFixed(1) });
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${long}</td><td>${per.toFixed(1)}</td><td>${(found / runs).toFixed(1)} / ${IDS.length}</td><td class="${rps >= 25 ? 'ok' : 'slow'}">${rps.toFixed(0)}</td>`;
+    tbody.append(tr);
+  }
+  w.terminate();
+
+  // Several workers reading 960 frames at once: how many frames per second get through.
+  const pbody = $('pool').querySelector('tbody'); pbody.replaceChildren(); $('pool').hidden = false;
+  let base = 0;
+  for (const n of [1, 2, 3, 4]) {
+    status(`${n} worker${n > 1 ? 's' : ''} in parallel…`); await pause();
+    const pool = Array.from({ length: n }, newWorker);
+    await Promise.all(pool.map((p) => read(p, img960)));
+    const t0 = performance.now(); let done = 0;
+    await Promise.all(pool.map(async (p) => { while (performance.now() - t0 < 2500) { await read(p, img960); done++; } }));
+    const rps = done / ((performance.now() - t0) / 1000);
+    pool.forEach((p) => p.terminate());
+    if (n === 1) base = rps;
+    results.pool.push({ workers: n, rps: +rps.toFixed(1) });
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${n}</td><td class="${Math.min(rps, CAMERA_FPS) >= 25 ? 'ok' : 'slow'}">${rps.toFixed(0)}</td><td>${(rps / base).toFixed(2)}×</td>`;
+    pbody.append(tr);
+  }
+
+  const best = results.sizes.filter((s) => s.ms <= 33).pop();
+  results.advice = best ? `Largest scan size that keeps up with the camera on one worker: ${best.long}` : 'Even 640 takes over 33 ms per frame on one worker; the reader relies on several workers here.';
+  $('summary').textContent = `${results.advice}\nCores reported: ${results.cores}\n${results.device}`;
+  $('summary').hidden = false;
+  status('Done.');
+  $('run').disabled = false; $('copy').disabled = false;
+}
+
+$('run').onclick = () => run().catch((e) => { status('The test stopped: ' + e.message); $('run').disabled = false; });
+$('copy').onclick = async (e) => {
+  const btn = e.currentTarget;
+  const text = [
+    'Reader speed test',
+    ...results.sizes.map((s) => `${s.long}px: ${s.ms} ms, ${s.found}/${IDS.length} tags, ${s.rps} reads/s (1 worker)`),
+    ...results.pool.map((p) => `${p.workers} workers @960: ${p.rps} reads/s`),
+    results.advice, `cores ${results.cores}`, results.device,
+  ].join('\n');
+  try { await navigator.clipboard.writeText(text); btn.textContent = 'Copied'; } catch { btn.textContent = 'Copy failed'; }
+  setTimeout(() => (btn.textContent = 'Copy results'), 1500);
+};
+</script>
+</body>
+</html>

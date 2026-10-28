@@ -183,13 +183,13 @@ function frameDelta(prev, cur, w, h) {
   return D;
 }
 
-function updateMotion(vw, vh) {
+function updateMotion(src, vw, vh) {
   const w = MOTION_W, h = Math.max(16, Math.round((MOTION_W * vh) / vw));
   if (motionCanvas.width !== w || motionCanvas.height !== h) {
     motionCanvas.width = w; motionCanvas.height = h;
     motion.prev = null;
   }
-  mctx.drawImage(video, 0, 0, w, h);
+  mctx.drawImage(src, 0, 0, w, h);
   const cur = bandProfiles(mctx.getImageData(0, 0, w, h).data, w, h);
   if (motion.prev) {
     const D = frameDelta(motion.prev, cur, w, h);
@@ -225,7 +225,7 @@ const state = {
   events: [], // recent camera/screen changes, shown in the speed readout
   area: AREA_OPTIONS.some(([v]) => v === store.get('area')) ? store.get('area') : 'auto',
   correct: store.get('correct') === '1',
-  showStats: store.get('stats') === '1',
+  showStats: false, // diagnostic: off at every launch
   flip: false, // in auto mode, alternates whole-frame and center passes
   paused: false,
   switching: false, // camera restarting: keep the last frame on screen
@@ -239,7 +239,6 @@ const state = {
   entered: new Map(), // id -> when it last came into view; orders the list, newest first
   detTimes: [],
   lastMs: 0,
-  passGap: 33, // smoothed ms between detection results
 };
 if (state.family.sizes && !state.family.sizes.includes(state.size)) state.size = state.family.sizes[0];
 
@@ -506,11 +505,12 @@ async function restartCamera() {
 
 /* ---------- detection ---------- */
 
-// Two detection workers, so a new frame can start while the previous one is still being
-// read; results carry a sequence number and a late result never replaces a newer frame on
-// screen. Safari under-reports cores on purpose (an iPhone has six), so only a browser that
-// reports a single core gets one worker.
-const workers = Array.from({ length: (navigator.hardwareConcurrency || 2) > 1 ? 2 : 1 }, () => {
+// Several detection workers, so new frames start while earlier ones are still being read;
+// results carry a sequence number and a late result never replaces a newer one. Three by
+// default (Safari under-reports cores on purpose; an iPhone has six), four where eight or
+// more are reported, one where only one is.
+const cores = navigator.hardwareConcurrency || 4;
+const workers = Array.from({ length: cores <= 1 ? 1 : cores >= 8 ? 4 : 3 }, () => {
   const w = new Worker('worker.js' + BUILD);
   w.busy = false;
   w.onmessage = (e) => onWorkerMessage(w, e.data);
@@ -537,18 +537,59 @@ function scanRect(vw, vh, center) {
   return { x: (vw - w) >> 1, y: (vh - h) >> 1, w, h };
 }
 
-function sendFrame() {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || video.readyState < 2 || state.switching) return;
-  const worker = workers.find((w) => !w.busy);
-  if (!worker) return; // every worker busy: skip this frame, the next one is moments away
+// Focus scan: the box around the tags being tracked (where they are now, from the camera
+// motion), padded for movement. It is small, so it is fast and can be read at full camera
+// resolution, which keeps tracked tags reading through blur. Null when there is nothing to
+// focus on, or the box would cover most of the frame anyway.
+function focusRect(vw, vh) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, side = 0;
+  for (const t of state.tracks) {
+    if (t.hits < CONFIRM_HITS || state.passNo - t.pass > 2) continue;
+    const q = shifted(t);
+    side = Math.max(side, sideLen(q));
+    for (const p of q) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+  }
+  if (!side) return null;
+  const pad = Math.max(32, side * 0.6);
+  x0 = Math.max(0, Math.floor(x0 - pad)); y0 = Math.max(0, Math.floor(y0 - pad));
+  x1 = Math.min(vw, Math.ceil(x1 + pad)); y1 = Math.min(vh, Math.ceil(y1 + pad));
+  const w = x1 - x0, h = y1 - y0;
+  if (w < 16 || h < 16 || w * h > 0.5 * vw * vh) return null;
+  return { x: x0, y: y0, w, h };
+}
+
+// What each frame reads. With tags in view, every other frame is a focus scan; the rest
+// cover the whole frame (alternating with the 2× center in auto mode) to find new tags.
+let passIndex = 0;
+function chooseRegion(vw, vh) {
+  passIndex++;
+  if (passIndex % 2 === 0) {
+    const r = focusRect(vw, vh);
+    if (r) return { r, cropped: true };
+  }
   state.flip = !state.flip;
   const center = state.area === 'center' || (state.area === 'auto' && state.flip);
-  const r = scanRect(vw, vh, center);
-  // Every pass gets the same pixel budget. Crops (the center pass, digital zoom) therefore
-  // read native pixels, and may upsample up to 2x so tiny tags have cells big enough to read.
-  const cropped = center || digitalZoom() > 1;
-  const budget = state.res || Math.max(r.w, r.h); // native: one detector pixel per camera pixel
+  return { r: scanRect(vw, vh, center), cropped: center || digitalZoom() > 1 };
+}
+
+// Latency guard: if reading a frame takes too long on this phone, scan smaller until it
+// keeps up, then grow back. Frequent reads matter more for feel than big ones.
+const latency = { avg: 0, factor: 1 };
+function noteLatency(ms) {
+  latency.avg = latency.avg ? latency.avg * 0.85 + ms * 0.15 : ms;
+  if (latency.avg > 45) latency.factor = Math.max(0.6, latency.factor * 0.95);
+  else if (latency.avg < 25) latency.factor = Math.min(1, latency.factor * 1.03);
+}
+
+// `src` is this frame: an ImageBitmap (handed to the worker, or closed) or the video itself.
+function sendFrame(src, vw, vh) {
+  const isBitmap = src !== video;
+  const worker = workers.find((w) => !w.busy);
+  if (!worker) { if (isBitmap) src.close(); return; } // all busy: skip; the next frame is moments away
+  const { r, cropped } = chooseRegion(vw, vh);
+  // Every pass gets the same pixel budget, so crops read native pixels and may upsample up
+  // to 2x for tiny tags. Native: one detector pixel per camera pixel.
+  const budget = (state.res || Math.max(r.w, r.h)) * latency.factor;
   const scale = Math.min(cropped && state.res ? 2 : 1, budget / Math.max(r.w, r.h));
   const w = Math.round(r.w * scale), h = Math.round(r.h * scale);
   state.scanW = w; state.scanH = h;
@@ -565,25 +606,12 @@ function sendFrame() {
   }
   const msg = { width: w, height: h, dict: setKey(), roi: { x: r.x, y: r.y, scale }, correct: state.correct, seq, expect };
   worker.busy = true;
-  if (bitmapPath) {
-    createImageBitmap(video).then((bitmap) => {
-      if (bitmap.width !== vw || bitmap.height !== vh) {
-        // Some browsers snapshot the raw, unrotated sensor frame. Reading that would be
-        // sideways, so use the plain path on this phone from now on.
-        bitmap.close();
-        bitmapPath = false;
-        worker.busy = false;
-        return;
-      }
-      worker.postMessage({ ...msg, bitmap, crop: r }, [bitmap]);
-    }, () => {
-      bitmapPath = false; // snapshot failed (rare): read pixels here from now on
-      worker.busy = false;
-    });
+  if (isBitmap) {
+    worker.postMessage({ ...msg, bitmap: src, crop: r }, [src]);
     return;
   }
   if (grab.width !== w || grab.height !== h) { grab.width = w; grab.height = h; }
-  gctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
+  gctx.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, w, h);
   const img = gctx.getImageData(0, 0, w, h);
   worker.postMessage({ ...msg, buffer: img.data.buffer }, [img.data.buffer]);
 }
@@ -611,8 +639,8 @@ function onResult(markers, ms, ref) {
   for (const m of markers) addRead(m, ref);
   state.tracks = state.tracks.filter((t) => state.passNo - t.pass <= holdPasses() + 1);
   state.lastMs = ms;
+  noteLatency(ms);
   const dt = state.detTimes;
-  if (dt.length) state.passGap = state.passGap * 0.8 + Math.min(1000, now - dt[dt.length - 1]) * 0.2;
   dt.push(now);
   while (dt.length && now - dt[0] > 1000) dt.shift();
 }
@@ -653,15 +681,38 @@ function markSeen(id) {
   state.seen.set(id, (state.seen.get(id) || 0) + 1);
 }
 
-// Every new camera frame: measure how the picture moved, paint it with the outlines
-// moved to match, and hand it to a free worker if there is one.
+// Every new camera frame: take one snapshot and use it for everything, so motion, the
+// picture on screen and detection can never disagree about which frame they saw. Then
+// measure how the picture moved, paint it with the outlines moved to match, and hand it
+// to a free worker if there is one.
+let snapshotting = false;
 function onVideoFrame() {
-  if (state.paused || state.switching) return;
+  if (state.paused || state.switching || snapshotting) return;
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || video.readyState < 2) return;
-  updateMotion(vw, vh);
-  draw();
-  sendFrame();
+  if (!bitmapPath) { processFrame(video, vw, vh); return; }
+  snapshotting = true;
+  createImageBitmap(video).then((bitmap) => {
+    snapshotting = false;
+    if (bitmap.width !== vw || bitmap.height !== vh) {
+      // Some browsers snapshot the raw, unrotated sensor frame; that would be sideways.
+      // Use the video directly on this phone from now on.
+      bitmap.close();
+      bitmapPath = false;
+      return;
+    }
+    if (state.paused || state.switching) { bitmap.close(); return; }
+    processFrame(bitmap, vw, vh);
+  }, () => {
+    snapshotting = false;
+    bitmapPath = false; // snapshots unavailable (rare): use the video directly
+  });
+}
+
+function processFrame(src, vw, vh) {
+  updateMotion(src, vw, vh);
+  draw(src);
+  sendFrame(src, vw, vh); // last: it may hand the bitmap to a worker
 }
 
 function startLoops() {
@@ -703,7 +754,7 @@ function paintVideo(ctx, source, vw, vh, cw, ch) {
 
 let lastVideoSize = '';
 
-function draw() {
+function draw(src) {
   const { dpr, cw, ch } = screenSize();
   const vw = video.videoWidth, vh = video.videoHeight;
   // If the stream changes shape mid-session (rotation, a camera reconfiguring), drop tags
@@ -718,7 +769,7 @@ function draw() {
     overlay.width = cw; overlay.height = ch;
   }
   if (!vw) return;
-  const s = paintVideo(octx, video, vw, vh, cw, ch);
+  const s = paintVideo(octx, src, vw, vh, cw, ch);
   const P = (p) => [(p[0] - vw / 2) * s + cw / 2, (p[1] - vh / 2) * s + ch / 2];
   if (state.area === 'center') drawScanArea(scanRect(vw, vh, true), P, dpr);
   // All outlines first, then all labels, so a box can never cover another tag's number.
@@ -859,7 +910,7 @@ function renderReadouts() {
   }
   if (state.showStats && now - statAt > 250) {
     statAt = now;
-    $('stat').textContent = `build ${BUILD.replace('?v=', '')} · ${state.detTimes.length} reads/s · ${state.lastMs.toFixed(1)} ms · camera ${video.videoWidth}×${video.videoHeight} · scan ${state.scanW || 0}×${state.scanH || 0} · ${workers.length} worker${workers.length > 1 ? 's' : ''}${bitmapPath ? '' : ' (no bitmaps)'}` + (state.events.length ? '\n' + state.events.join('\n') : '');
+    $('stat').textContent = `build ${BUILD.replace('?v=', '')} · ${state.detTimes.length} reads/s · ${state.lastMs.toFixed(1)} ms · camera ${video.videoWidth}×${video.videoHeight} · scan ${state.scanW || 0}×${state.scanH || 0}${latency.factor < 0.99 ? ` (guard ${Math.round(latency.factor * 100)}%)` : ''} · ${workers.length} worker${workers.length > 1 ? 's' : ''}${bitmapPath ? '' : ' (no bitmaps)'}` + (state.events.length ? '\n' + state.events.join('\n') : '');
   }
   $('live').classList.toggle('live', !state.paused && state.detTimes.length > 0 && now - state.detTimes[state.detTimes.length - 1] < 500);
 }
@@ -872,7 +923,11 @@ function renderSeen(inView = new Set()) {
   seenAt = performance.now();
   ensureMiniDict();
   const list = $('seen');
-  const ids = [...state.seen.keys()].sort((a, b) => (state.entered.get(b) || 0) - (state.entered.get(a) || 0));
+  // Ordered by last seen: tags in view first (newest arrival on the left; they are all
+  // "seen now", so ordering them by that would reshuffle every frame), then the rest by
+  // when they were last in view, most recent first.
+  const order = (id) => (inView.has(id) ? 1e12 + (state.entered.get(id) || 0) : lastSeenAt.get(id) || 0);
+  const ids = [...state.seen.keys()].sort((a, b) => order(b) - order(a));
   $('seenCount').textContent = ids.length ? `${ids.length} tag${ids.length === 1 ? '' : 's'} read` : 'No tags yet';
   $('emptyHint').hidden = ids.length > 0;
   for (const [id, el] of cards) if (!state.seen.has(id)) { el.remove(); cards.delete(id); }
@@ -950,7 +1005,6 @@ function renderSettings() {
   });
   options($('statOpts'), [[false, 'Off'], [true, 'On']], state.showStats, (v) => {
     state.showStats = v;
-    store.set('stats', v ? '1' : '0');
     $('stat').hidden = !v || $('top').hidden;
   });
   $('build').textContent = `Build ${BUILD.replace('?v=', '')}`;

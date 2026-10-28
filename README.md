@@ -3,12 +3,16 @@
 Phone-first ArUco / AprilTag tools. Static site, no build step, nothing leaves the device.
 
 - **Reader:** https://wolfffff.github.io/aruco-tools/ (live camera detection)
+- **Speed test:** https://wolfffff.github.io/aruco-tools/bench.html (runs the real detector on your device)
 - **Marker sheets:** https://wolfffff.github.io/aruco-tools/generate.html (printable markers at an exact size in mm)
 
 ## Reader
 
 - Exact OpenCV sets: `DICT_4X4/5X5/6X6/7X7` × `_50/_100/_250/_1000`, `DICT_ARUCO_ORIGINAL`, `DICT_ARUCO_MIP_36h12`, `DICT_APRILTAG_16h5/25h9/36h11`
-- Detection runs in Web Workers (two on 4+ core phones), once per camera frame; frames reach the workers as GPU bitmaps so scaling and pixel readout never block the page
+- One GPU snapshot per camera frame drives motion, the picture on screen and detection, so they always agree on the frame
+- Detection in a pool of Web Workers (3, or 4 on 8+ cores); frames are skipped, never queued, when all are busy
+- Focus scans: with tags in view, every other frame reads just the box around them at full camera resolution
+- Latency guard shrinks the scan when a phone can't keep up, and grows it back
 - Typed-array pixel core (grayscale, adaptive threshold, contour tracing) with results identical to js-aruco2
 - Offline-first: opens from the phone's cache instantly, updates in the background; skips the start tap when camera access is already granted
 - Track-then-verify: a confirmed tag missed by a pass (motion blur) is re-checked around its predicted position (at most 3 per frame, ~1 ms each), accepting only the same ID, and fades out over two passes; cuts flicker while moving without adding false reads

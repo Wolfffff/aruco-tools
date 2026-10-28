@@ -1,7 +1,7 @@
 // Offline-first: everything is served from the phone immediately, and refreshed from the
 // network in the background for next time. A release bumps VERSION here and the
 // `app.js?v=` number in index.html together, so a page and its scripts never mix releases.
-const VERSION = 20;
+const VERSION = 21;
 const CACHE = 'aruco-tools-v' + VERSION;
 const CORE = [
   './',
@@ -12,6 +12,7 @@ const CORE = [
   'vendor/aruco.js',
   'vendor/dictionaries/aruco_4x4_1000.js',
   'generate.html',
+  'bench.html',
   'icon.svg',
   'manifest.webmanifest',
 ];
