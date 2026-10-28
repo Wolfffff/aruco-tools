@@ -96,6 +96,7 @@ const MIN_CONTRAST = 45; // grey levels between darkest and brightest pixel in t
 function decode(det, candidate, maxErrors) {
   const n = det.dictionary.markSize; // cells across, black border included
   const size = n * CELL;
+  if (det.homography.data.length !== size * size) det.homography = new CV.Image(size, size, new Uint8Array(size * size));
   const img = CV.warp(det.grey, det.homography, candidate, size);
   const d = img.data;
   const len = size * size;
@@ -169,14 +170,141 @@ function plausible(q) {
   return min >= 10 && max / min < 3.5;
 }
 
-function detect(det, image, maxErrors) {
+/* ---------- fast pixel core ----------
+   Same algorithms as cv.js (grayscale, stack box blur + adaptive threshold, Suzuki border
+   following), rewritten on typed arrays with integer math and no per-pixel objects.
+   These three stages were ~85% of the time per frame. */
+
+const buf = { w: 0, h: 0 };
+
+function ensureBuffers(w, h) {
+  if (buf.w === w && buf.h === h) return;
+  buf.w = w; buf.h = h;
+  buf.gray = new Uint8Array(w * h);
+  buf.tmp = new Uint8Array(w * h);
+  // Binary image with a one-pixel zero border, as the contour tracer expects. Borders
+  // are never written, so allocating once keeps them zero.
+  buf.labels = new Int32Array((w + 2) * (h + 2));
+  buf.pts = new Int32Array(8192);
+}
+
+function grayscale(rgba, w, h) {
+  const px = new Uint32Array(rgba.buffer, rgba.byteOffset, w * h);
+  const g = buf.gray;
+  // 0.299 R + 0.587 G + 0.114 B in 16-bit fixed point (pixels are little-endian RGBA).
+  for (let i = 0, n = w * h; i < n; i++) {
+    const v = px[i];
+    g[i] = ((v & 255) * 19595 + ((v >>> 8) & 255) * 38470 + ((v >>> 16) & 255) * 7471 + 32768) >>> 16;
+  }
+}
+
+// Adaptive threshold: a pixel is foreground (dark) when it is at least `t` below the mean of
+// its (2k+1)² neighbourhood, edges repeated. Same integer rounding as CV.stackBoxBlur, so
+// results match the original library. The horizontal pass runs along rows; the vertical
+// pass keeps one running sum per column and also sweeps along rows, which is far kinder
+// to the CPU cache than walking down columns. The threshold is folded into that sweep.
+function adaptiveThreshold(k, t) {
+  const { w, h, gray: src, tmp, labels } = buf;
+  const mult = CV.stackBoxBlurMult[k], shift = CV.stackBoxBlurShift[k];
+  const w1 = w - 1, h1 = h - 1, W = w + 2;
+  for (let y = 0, row = 0; y < h; y++, row += w) {
+    let sum = (k + 1) * src[row];
+    for (let i = 1; i <= k; i++) sum += src[row + (i < w1 ? i : w1)];
+    for (let x = 0; x < w; x++) {
+      tmp[row + x] = (sum * mult) >>> shift;
+      const add = x + k + 1, sub = x - k;
+      sum += src[row + (add < w1 ? add : w1)] - src[row + (sub > 0 ? sub : 0)];
+    }
+  }
+  const col = buf.col && buf.col.length === w ? buf.col : (buf.col = new Int32Array(w));
+  for (let x = 0; x < w; x++) col[x] = (k + 1) * tmp[x];
+  for (let i = 1; i <= k; i++) { const r = (i < h1 ? i : h1) * w; for (let x = 0; x < w; x++) col[x] += tmp[r + x]; }
+  for (let y = 0; y < h; y++) {
+    const row = y * w, out = (y + 1) * W + 1;
+    const addRow = (y + k + 1 < h1 ? y + k + 1 : h1) * w, subRow = (y - k > 0 ? y - k : 0) * w;
+    for (let x = 0; x < w; x++) {
+      labels[out + x] = src[row + x] - ((col[x] * mult) >>> shift) <= -t ? 1 : 0;
+      col[x] += tmp[addRow + x] - tmp[subRow + x];
+    }
+  }
+}
+
+const NB = [[1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [-1, 1], [0, 1], [1, 1]];
+
+// Suzuki-Abe border following, as CV.findContours. Points go into a reusable flat buffer;
+// only contours with at least `minLen` points become arrays of {x, y}, since only those
+// can be tags. Everything else (thousands of specks per frame) costs no allocation.
+function findContours(minLen) {
+  const { w, h, labels: src } = buf;
+  const W = w + 2;
+  const deltas = new Int32Array(16);
+  for (let i = 0; i < 8; i++) deltas[i] = deltas[i + 8] = NB[i][0] + NB[i][1] * W;
+  const contours = [];
+  let pts = buf.pts;
+  let nbd = 1;
+  let pos = W + 1;
+  for (let i = 0; i < h; i++, pos += 2) {
+    for (let j = 0; j < w; j++, pos++) {
+      const pix = src[pos];
+      if (pix === 0) continue;
+      let hole = false;
+      if (pix === 1 && src[pos - 1] === 0) hole = false;
+      else if (pix >= 1 && src[pos + 1] === 0) hole = true;
+      else continue;
+      nbd++;
+      // borderFollowing
+      let n = 0;
+      let px = j, py = i;
+      let s = hole ? 0 : 4, sEnd = s, pos1;
+      do {
+        s = (s - 1) & 7;
+        pos1 = pos + deltas[s];
+        if (src[pos1] !== 0) break;
+      } while (s !== sEnd);
+      if (s === sEnd) {
+        src[pos] = -nbd;
+        pts[0] = px; pts[1] = py; n = 1;
+      } else {
+        let pos3 = pos, pos4;
+        for (;;) {
+          sEnd = s;
+          do { pos4 = pos3 + deltas[++s]; } while (src[pos4] === 0);
+          s &= 7;
+          if (((s - 1) >>> 0) < (sEnd >>> 0)) src[pos3] = -nbd;
+          else if (src[pos3] === 1) src[pos3] = nbd;
+          if (2 * n + 2 > pts.length) { const bigger = new Int32Array(pts.length * 2); bigger.set(pts); pts = buf.pts = bigger; }
+          pts[2 * n] = px; pts[2 * n + 1] = py; n++;
+          px += NB[s][0]; py += NB[s][1];
+          if (pos4 === pos && pos3 === pos1) break;
+          pos3 = pos4;
+          s = (s + 4) & 7;
+        }
+      }
+      if (n >= minLen) {
+        const c = new Array(n);
+        for (let k = 0; k < n; k++) c[k] = { x: pts[2 * k], y: pts[2 * k + 1] };
+        c.hole = hole;
+        contours.push(c);
+      }
+    }
+  }
+  return contours;
+}
+
+function detect(det, rgba, w, h, maxErrors, timings) {
   const p = PASSES[det.pass];
-  CV.grayscale(image, det.grey);
-  CV.adaptiveThreshold(det.grey, det.thres, p.kernel, p.thresh);
-  det.contours = CV.findContours(det.thres, det.binary);
-  let cands = det.findCandidates(det.contours, image.width * 0.01, 0.05, 10);
+  let t = performance.now();
+  const lap = (k) => { if (timings) { const n = performance.now(); timings[k] = (timings[k] || 0) + n - t; t = n; } };
+  ensureBuffers(w, h);
+  grayscale(rgba, w, h); lap('gray');
+  adaptiveThreshold(p.kernel, p.thresh); lap('threshold');
+  const minSize = w * 0.01;
+  det.contours = findContours(minSize); lap('contours');
+  let cands = det.findCandidates(det.contours, minSize, 0.05, 10);
   cands = det.clockwiseCorners(cands).filter(plausible);
-  cands = det.notTooNear(cands, 6);
+  cands = det.notTooNear(cands, 6); lap('candidates');
+  if (det.grey.data !== buf.gray) det.grey = new CV.Image(w, h, buf.gray);
+  det.grey.width = w; det.grey.height = h;
   det.dictionary.tau = maxErrors + 1; // dictionary.find accepts distance < tau
   const out = [];
   for (const c of cands) {
@@ -188,18 +316,50 @@ function detect(det, image, maxErrors) {
     const dup = out.some((o) => o.id === m.id && Math.hypot(o.cx - cx, o.cy - cy) < Math.hypot(m.corners[0].x - m.corners[2].x, m.corners[0].y - m.corners[2].y) / 2);
     if (!dup) out.push(Object.assign(m, { cx, cy }));
   }
+  lap('decode');
   return out;
 }
 
+// Frames arrive either as RGBA pixels from the page, or as an ImageBitmap of the whole
+// camera frame plus the crop to scan. The bitmap path keeps scaling and the pixel
+// readout off the page's thread, where they would compete with drawing the screen.
+let grabCanvas = null, grabCtx = null;
+function pixelsFromBitmap(bitmap, r, w, h) {
+  if (!grabCanvas) {
+    grabCanvas = new OffscreenCanvas(w, h);
+    grabCtx = grabCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if (grabCanvas.width !== w || grabCanvas.height !== h) { grabCanvas.width = w; grabCanvas.height = h; }
+  grabCtx.drawImage(bitmap, r.x, r.y, r.w, r.h, 0, 0, w, h);
+  bitmap.close();
+  return grabCtx.getImageData(0, 0, w, h).data;
+}
+
 onmessage = (e) => {
-  const { width, height, buffer, dict, roi, correct } = e.data;
+  const { width, height, buffer, bitmap, crop, dict, roi, correct, seq, profile } = e.data;
+  if (e.data.warm) {
+    // Load the marker set and compute its error budget before the first frame needs it.
+    try { getDetector(e.data.warm); } catch {}
+    postMessage({ warm: true });
+    return;
+  }
+  if (e.data.probe) {
+    // Can this browser draw into a canvas inside a worker?
+    let ok = false;
+    try { ok = typeof OffscreenCanvas === 'function' && !!new OffscreenCanvas(1, 1).getContext('2d'); } catch {}
+    postMessage({ probe: true, offscreen: ok });
+    return;
+  }
   const t0 = performance.now();
+  const timings = profile ? {} : null;
   let markers = [];
   let error = null;
   try {
+    const rgba = bitmap ? pixelsFromBitmap(bitmap, crop, width, height) : new Uint8ClampedArray(buffer);
+    if (timings) timings.readout = performance.now() - t0;
     const det = getDetector(dict);
     const maxErrors = correct ? det.correctable : 0;
-    const found = detect(det, { width, height, data: new Uint8ClampedArray(buffer) }, maxErrors);
+    const found = detect(det, rgba, width, height, maxErrors, timings);
     // Stick with a threshold setting while it works; rotate through the others when it doesn't.
     if (found.length) det.misses = 0;
     else if (++det.misses >= 2) { det.pass = (det.pass + 1) % PASSES.length; det.misses = 0; }
@@ -212,6 +372,7 @@ onmessage = (e) => {
   } catch (err) {
     error = String(err);
   }
-  // Hand the pixel buffer back so the main thread can reuse it.
-  postMessage({ markers, ms: performance.now() - t0, buffer, error }, [buffer]);
+  const msg = { markers, ms: performance.now() - t0, error, seq, timings };
+  // Hand a pixel buffer back so the page can reuse it.
+  if (buffer) { msg.buffer = buffer; postMessage(msg, [buffer]); } else postMessage(msg);
 };

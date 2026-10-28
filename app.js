@@ -66,7 +66,6 @@ const state = {
   flip: false, // in auto mode, alternates whole-frame and center passes
   paused: false,
   switching: false, // camera restarting: keep the last frame on screen
-  busy: false,
   pending: false,
   loopsStarted: false,
   track: null,
@@ -168,22 +167,16 @@ async function upgradeResolution(track) {
   return Boolean(bestAsk);
 }
 
-// Resolves once a frame with real dimensions has been presented (or after 2 s, as a fallback).
+// Resolves as soon as the video has a decoded frame with its real size (or after 2 s, as a
+// fallback). The canvas paints from that size, so nothing on screen can appear small.
 function firstFrame() {
   return new Promise((resolve) => {
-    let settled = false;
-    const finish = () => { if (!settled) { settled = true; resolve(); } };
-    // Wait one paint so the frame is on screen, but never depend on paints alone:
-    // they stop entirely while the page is in the background.
-    const done = () => { requestAnimationFrame(finish); setTimeout(finish, 100); };
-    const timer = setTimeout(done, 2000);
+    const t0 = performance.now();
     const check = () => {
-      if (video.videoWidth > 0) { clearTimeout(timer); done(); }
-      else if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(check);
-      else setTimeout(check, 30);
+      if ((video.videoWidth > 0 && video.readyState >= 2) || performance.now() - t0 > 2000) resolve();
+      else setTimeout(check, 16);
     };
-    if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(check);
-    else check();
+    check();
   });
 }
 
@@ -270,9 +263,7 @@ async function restartCamera() {
   state.switching = true;
   state.track?.stop();
   state.track = null;
-  state.busy = false;
   state.tracks = []; // positions are in the old stream's pixels
-  state.inflight = null;
   try {
     await startCamera();
   } finally {
@@ -282,7 +273,28 @@ async function restartCamera() {
 
 /* ---------- detection ---------- */
 
-const worker = new Worker('worker.js' + BUILD);
+// Detection workers. Two on phones with four or more cores, so a new frame can start while
+// the previous one is still being read; results carry a sequence number and a late result
+// never replaces a newer frame on screen.
+const workers = Array.from({ length: (navigator.hardwareConcurrency || 2) >= 4 ? 2 : 1 }, () => {
+  const w = new Worker('worker.js' + BUILD);
+  w.busy = false;
+  w.onmessage = (e) => onWorkerMessage(w, e.data);
+  return w;
+});
+
+// Where supported, the page takes a GPU snapshot of the frame (createImageBitmap), paints
+// the screen from it, and hands it to a worker, which scales it and reads the pixels.
+// That keeps the slow CPU-side scaling and readout off the page's thread entirely.
+let bitmapPath = false;
+if (typeof createImageBitmap === 'function') {
+  workers[0].busy = true;
+  workers[0].postMessage({ probe: true });
+}
+
+let frameSeq = 0;
+let shownSeq = 0;
+const inflight = new Map(); // seq -> screen shot of the frame being read
 
 // The part of the video frame being scanned, in video pixels.
 function scanRect(vw, vh, center) {
@@ -294,6 +306,8 @@ function scanRect(vw, vh, center) {
 function sendFrame() {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || video.readyState < 2 || state.switching) return;
+  const worker = workers.find((w) => !w.busy);
+  if (!worker) { state.pending = true; return; }
   state.flip = !state.flip;
   const center = state.area === 'center' || (state.area === 'auto' && state.flip);
   const r = scanRect(vw, vh, center);
@@ -303,29 +317,50 @@ function sendFrame() {
   const budget = state.res || Math.max(r.w, r.h); // native: one detector pixel per camera pixel
   const scale = Math.min(cropped && state.res ? 2 : 1, budget / Math.max(r.w, r.h));
   const w = Math.round(r.w * scale), h = Math.round(r.h * scale);
+  state.scanW = w; state.scanH = h;
+  const seq = ++frameSeq;
+  const msg = { width: w, height: h, dict: setKey(), roi: { x: r.x, y: r.y, scale }, correct: state.correct, seq };
+  worker.busy = true;
+  if (bitmapPath) {
+    createImageBitmap(video).then((bitmap) => {
+      inflight.set(seq, takeShot(bitmap, vw, vh)); // the same frame, sized for the screen
+      worker.postMessage({ ...msg, bitmap, crop: r }, [bitmap]);
+    }, () => {
+      // Snapshot failed (rare): fall back to reading pixels here from now on.
+      bitmapPath = false;
+      worker.busy = false;
+    });
+    return;
+  }
   if (grab.width !== w || grab.height !== h) { grab.width = w; grab.height = h; }
   gctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
-  state.inflight = takeShot(vw, vh); // the same camera frame, sized for the screen
+  inflight.set(seq, takeShot(video, vw, vh));
   const img = gctx.getImageData(0, 0, w, h);
-  state.busy = true;
-  worker.postMessage(
-    { width: w, height: h, buffer: img.data.buffer, dict: setKey(), roi: { x: r.x, y: r.y, scale }, correct: state.correct },
-    [img.data.buffer],
-  );
+  worker.postMessage({ ...msg, buffer: img.data.buffer }, [img.data.buffer]);
 }
 
-worker.onmessage = (e) => {
-  state.busy = false;
-  const { markers, ms, error } = e.data;
-  if (!state.paused && !state.switching) {
+function onWorkerMessage(worker, data) {
+  if (data.warm) return;
+  worker.busy = false;
+  if (data.probe) {
+    bitmapPath = data.offscreen;
+    return;
+  }
+  const { markers, ms, error, seq } = data;
+  const shot = inflight.get(seq);
+  inflight.delete(seq);
+  if (seq > shownSeq && !state.paused && !state.switching) {
     // Show the frame that was just analyzed, so outlines match the picture exactly.
-    if (state.inflight) { state.shown = state.inflight; state.inflight = null; viewDirty = true; }
+    shownSeq = seq;
+    if (shot) { releaseShot(state.shown); state.shown = shot; viewDirty = true; }
     if (error) console.error(error);
     else onResult(markers, ms);
+  } else {
+    releaseShot(shot); // a newer frame is already on screen
   }
-  // A camera frame arrived while we were busy: process it right away.
+  // A camera frame arrived while all workers were busy: process it right away.
   if (state.pending) { state.pending = false; sendFrame(); }
-};
+}
 
 function onResult(markers, ms) {
   const now = performance.now();
@@ -375,9 +410,7 @@ function markSeen(id) {
 // Detection follows new camera frames, so each frame is processed at most once.
 // While the worker is busy we only remember that a newer frame is waiting.
 function onVideoFrame() {
-  if (state.paused) return;
-  if (state.busy) state.pending = true;
-  else sendFrame();
+  if (!state.paused) sendFrame(); // queues itself as pending if every worker is busy
 }
 
 function startLoops() {
@@ -405,8 +438,8 @@ function startLoops() {
 
 /* ---------- drawing ---------- */
 
-// Two screen-sized buffers: one on screen, one receiving the frame being analyzed.
-const shots = [document.createElement('canvas'), document.createElement('canvas')];
+// Screen-sized buffers: one on screen, one per frame being analyzed. Recycled, not reallocated.
+const shotPool = [];
 let viewDirty = true;
 
 function screenSize() {
@@ -416,19 +449,23 @@ function screenSize() {
 
 // Fill the screen with the camera, cropping the overflow (like object-fit: cover),
 // magnified about the center by any digital zoom.
-function paintVideo(ctx, vw, vh, cw, ch) {
+function paintVideo(ctx, source, vw, vh, cw, ch) {
   const s = Math.max(cw / vw, ch / vh) * digitalZoom();
-  ctx.drawImage(video, cw / 2 - (vw * s) / 2, ch / 2 - (vh * s) / 2, vw * s, vh * s);
+  ctx.drawImage(source, cw / 2 - (vw * s) / 2, ch / 2 - (vh * s) / 2, vw * s, vh * s);
   return s;
 }
 
-function takeShot(vw, vh) {
+function takeShot(source, vw, vh) {
   const { cw, ch } = screenSize();
-  const canvas = shots[state.shown?.canvas === shots[0] ? 1 : 0];
+  const canvas = shotPool.pop() || document.createElement('canvas');
   if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
   const ctx = canvas.getContext('2d', { alpha: false });
-  const s = paintVideo(ctx, vw, vh, cw, ch);
+  const s = paintVideo(ctx, source, vw, vh, cw, ch);
   return { canvas, s, vw, vh };
+}
+
+function releaseShot(shot) {
+  if (shot && shotPool.length < 4) shotPool.push(shot.canvas);
 }
 
 function draw() {
@@ -441,7 +478,7 @@ function draw() {
   if (!shot || shot.canvas.width !== cw || shot.canvas.height !== ch) {
     octx.fillStyle = '#000';
     octx.fillRect(0, 0, cw, ch);
-    if (vw && video.readyState >= 2) paintVideo(octx, vw, vh, cw, ch);
+    if (vw && video.readyState >= 2) paintVideo(octx, video, vw, vh, cw, ch);
     return;
   }
   if (!viewDirty) return;
@@ -568,7 +605,7 @@ function renderReadouts() {
   }
   if (state.showStats && now - statAt > 250) {
     statAt = now;
-    $('stat').textContent = `${state.detTimes.length} reads/s · ${state.lastMs.toFixed(1)} ms · camera ${video.videoWidth}×${video.videoHeight} · scan ${grab.width}×${grab.height}`;
+    $('stat').textContent = `${state.detTimes.length} reads/s · ${state.lastMs.toFixed(1)} ms · camera ${video.videoWidth}×${video.videoHeight} · scan ${state.scanW || 0}×${state.scanH || 0} · ${workers.length} worker${workers.length > 1 ? 's' : ''}${bitmapPath ? '' : ' (no bitmaps)'}`;
   }
   $('live').classList.toggle('live', !state.paused && state.detTimes.length > 0 && now - state.detTimes[state.detTimes.length - 1] < 500);
 }
@@ -594,6 +631,8 @@ function renderSeen(inView = new Set()) {
       el.style.setProperty('--c', color(id));
       el.innerHTML = '<span class="mini"></span><span class="meta"><b></b><small></small></span>';
       el.querySelector('b').textContent = id;
+      el.classList.add('new');
+      el.addEventListener('animationend', () => el.classList.remove('new'), { once: true });
       cards.set(id, el);
     }
     const mini = el.querySelector('.mini');
@@ -655,7 +694,13 @@ function renderSettings() {
   $('setName').textContent = state.family.label + (state.family.sizes ? ` · ${state.size} IDs` : '');
 }
 
+// Have every worker load the current marker set now, not on the first camera frame.
+function warmWorkers() {
+  for (const w of workers) w.postMessage({ warm: setKey() });
+}
+
 function resetReads() {
+  warmWorkers();
   state.tracks = [];
   state.entered.clear();
   viewDirty = true;
@@ -776,6 +821,15 @@ $('genNext').onclick = () => { $('genId').value = (+$('genId').value || 0) + 1; 
 
 renderSettings();
 renderSeen();
+warmWorkers();
+
+// If this site already has camera permission, skip the start screen's tap.
+(async () => {
+  try {
+    const p = await navigator.permissions?.query({ name: 'camera' });
+    if (p?.state === 'granted') startCamera();
+  } catch {} // some browsers cannot query camera permission; the button still works
+})();
 
 // Start-screen emblem: a real DICT_4X4 marker, id 0.
 $('mark').innerHTML = Array.from({ length: 36 }, (_, i) => {
