@@ -21,21 +21,48 @@ const AREA_OPTIONS = [['auto', 'Auto'], ['full', 'Whole frame'], ['center', 'Far
 // A tag is shown only after it is read twice at the same place, which removes nearly
 // all one-frame misreads of textures and text.
 const CONFIRM_HITS = 2;
-// A confirmed tag a pass misses (usually motion blur) stays, moving with the camera, and
-// fades out over a few passes. Not every pass looks everywhere (focus scans cover only
-// tracked tags; in auto mode whole-frame and centre passes alternate), so auto gets one more.
-const holdPasses = () => (state.area === 'auto' ? 4 : 3);
+// A confirmed tag that a pass misses (motion blur, glare, a finger) is held: it moves with
+// the camera, so it stays on the tag, and it is looked for again around that spot. The hold
+// is a fixed time, not a number of passes, so it feels the same on fast and slow phones: it
+// stays solid, then fades over its last stretch. A held tag that moves off screen is
+// dropped at once.
+const HOLD_MS = 400;
+const FADE_MS = 200;
+const FADE_IN_MS = 150;
 // Tags missed for at most this many passes are still looked for: in focus scans and in the
 // worker's re-check of expected spots.
-const RECHECK_PASSES = 2;
+const RECHECK_PASSES = 3;
 
-// Fully visible while being read; fades out over the hold when missed, in over two passes
-// when first confirmed.
-function trackAlpha(t) {
-  const missed = state.passNo - t.pass;
-  const out = missed === 0 ? 1 : Math.max(0, 1 - missed / (holdPasses() + 1));
-  const fadeIn = Math.min(1, (state.passNo - (t.confirmedAt ?? state.passNo) + 1) / 2);
+// While the camera swings, motion blur stops detection but the motion tracking keeps held
+// tags on target, so the hold clock waits until the camera settles (at most SWING_MAX_MS
+// after the last read). Missed for one pass is always bridged, even on a slow phone.
+const SWING_MAX_MS = 1500;
+function holdAge(t, now) {
+  const settled = Math.min(Math.max(t.at, motion.lastFast), t.at + SWING_MAX_MS);
+  return now - settled;
+}
+const isHeld = (t, now) => state.passNo - t.pass <= 1 || holdAge(t, now) <= HOLD_MS;
+
+// Opacity, by time so it changes smoothly every painted frame: in over FADE_IN_MS when a
+// tag is confirmed, solid while it is read or briefly missed, then out to nothing over the
+// last FADE_MS of the hold.
+function trackAlpha(t, now) {
+  const age = holdAge(t, now);
+  const out = state.passNo === t.pass ? 1 : Math.min(1, Math.max(0, (HOLD_MS - age) / FADE_MS));
+  const fadeIn = Math.min(1, (now - (t.confirmedTime ?? now)) / FADE_IN_MS);
   return out * fadeIn;
+}
+
+// The opacity actually drawn glides toward trackAlpha at a capped rate, so a tag read again
+// halfway through fading out comes back smoothly instead of jumping to full.
+function displayAlpha(t, now) {
+  const target = trackAlpha(t, now);
+  const dt = t.drawnAt ? now - t.drawnAt : 0;
+  t.drawnAt = now;
+  if (t.shown == null) t.shown = target;
+  else if (target > t.shown) t.shown = Math.min(target, t.shown + dt / FADE_IN_MS);
+  else t.shown = Math.max(target, t.shown - dt / FADE_MS);
+  return t.shown;
 }
 
 /* ---------- camera motion ----------
@@ -58,7 +85,7 @@ const GRID = 3;
 const motionCanvas = document.createElement('canvas');
 const mctx = motionCanvas.getContext('2d');
 const IDENTITY = { a: 1, b: 0, tx: 0, ty: 0 };
-const motion = { prev: null, M: { ...IDENTITY } };
+const motion = { prev: null, M: { ...IDENTITY }, lastFast: 0 }; // lastFast: when the camera last moved fast
 
 const compose = (D, M) => ({ // D after M
   a: D.a * M.a - D.b * M.b, b: D.a * M.b + D.b * M.a,
@@ -200,6 +227,9 @@ function updateMotion(src, vw, vh) {
     if (D) {
       const k = vw / w; // camera pixels per motion-image pixel
       motion.M = compose({ a: D.a, b: D.b, tx: D.tx * k, ty: D.ty * k }, motion.M);
+      // Fast: more than ~1.5% of the frame per frame, by sliding, zooming or turning.
+      const speed = Math.hypot(D.tx * k, D.ty * k) + (Math.abs(Math.hypot(D.a, D.b) - 1) + Math.abs(D.b)) * vw;
+      if (speed > vw * 0.015) motion.lastFast = performance.now();
     }
   }
   motion.prev = cur;
@@ -230,7 +260,6 @@ const state = {
   area: AREA_OPTIONS.some(([v]) => v === store.get('area')) ? store.get('area') : 'auto',
   correct: store.get('correct') === '1',
   showStats: false, // diagnostic: off at every launch
-  flip: false, // in auto mode, alternates whole-frame and center passes
   paused: false,
   switching: false, // camera restarting: keep the last frame on screen
   loopsStarted: false,
@@ -352,7 +381,7 @@ async function openStream(deviceId, previous = null) {
   const video = {
     width: { ideal: CAMERA_SIZES[state.cam][0] },
     height: { ideal: CAMERA_SIZES[state.cam][1] },
-    frameRate: { ideal: 30 },
+    frameRate: { ideal: 60 }, // smoother picture and outlines; detection takes what it can
   };
   if (deviceId) video.deviceId = { exact: deviceId };
   else video.facingMode = { ideal: 'environment' };
@@ -418,7 +447,7 @@ async function upgradeResolution(track) {
   ];
   for (const ask of asks) {
     if (state.track !== track) return false; // the camera was switched meanwhile
-    try { await track.applyConstraints({ ...ask, frameRate: { ideal: 30 } }); } catch { continue; }
+    try { await track.applyConstraints({ ...ask, frameRate: { ideal: 60 } }); } catch { continue; }
     await settle();
     const got = longSide();
     if (got > best) { best = got; bestAsk = ask; }
@@ -426,7 +455,7 @@ async function upgradeResolution(track) {
   }
   // The last attempt may have been a worse one; settle on the best that worked.
   if (state.track === track && bestAsk && longSide() < best) {
-    await track.applyConstraints({ ...bestAsk, frameRate: { ideal: 30 } }).catch(() => {});
+    await track.applyConstraints({ ...bestAsk, frameRate: { ideal: 60 } }).catch(() => {});
   }
   state.tracks = []; // positions may now be in a different stream size
   dropInFlight();
@@ -626,9 +655,10 @@ function focusRect(vw, vh) {
     for (const p of q) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
   }
   if (!side) return null;
-  const pad = Math.max(32, side * 0.6);
-  x0 = Math.max(0, Math.floor(x0 - pad)); y0 = Math.max(0, Math.floor(y0 - pad));
-  x1 = Math.min(vw, Math.ceil(x1 + pad)); y1 = Math.min(vh, Math.ceil(y1 + pad));
+  // Padded for movement, and kept within what is on screen.
+  const pad = Math.max(32, side * 0.6), v = scanRect(vw, vh, false);
+  x0 = Math.max(v.x, Math.floor(x0 - pad)); y0 = Math.max(v.y, Math.floor(y0 - pad));
+  x1 = Math.min(v.x + v.w, Math.ceil(x1 + pad)); y1 = Math.min(v.y + v.h, Math.ceil(y1 + pad));
   const w = x1 - x0, h = y1 - y0;
   if (w < 16 || h < 16 || w * h > 0.5 * vw * vh) return null;
   return { x: x0, y: y0, w, h };
@@ -636,15 +666,17 @@ function focusRect(vw, vh) {
 
 // What each frame reads. With tags in view, every other frame is a focus scan; the rest
 // cover the whole frame (alternating with the 2× center in auto mode) to find new tags.
-let passIndex = 0;
+// Without tracked tags, auto mode alternates whole frame and centre. While tags are tracked,
+// every other frame is a focus scan, and of the rest only every third is a centre pass, so
+// whole-frame scans (which find new and returning tags anywhere on screen) still come often.
+let passIndex = 0, wideIndex = 0;
 function chooseRegion(vw, vh) {
   passIndex++;
-  if (passIndex % 2 === 0) {
-    const r = focusRect(vw, vh);
-    if (r) return { r, cropped: true };
-  }
-  state.flip = !state.flip;
-  const center = state.area === 'center' || (state.area === 'auto' && state.flip);
+  const focus = passIndex % 2 === 0 ? focusRect(vw, vh) : null;
+  if (focus) return { r: focus, cropped: true };
+  wideIndex++;
+  const tracking = state.tracks.some((t) => t.hits >= CONFIRM_HITS);
+  const center = state.area === 'center' || (state.area === 'auto' && wideIndex % (tracking ? 3 : 2) === 0);
   return { r: scanRect(vw, vh, center), cropped: center || digitalZoom() > 1 };
 }
 
@@ -732,7 +764,12 @@ function onResult(markers, ms, ref) {
   const now = performance.now();
   state.passNo++;
   for (const m of markers) addRead(m, ref);
-  state.tracks = state.tracks.filter((t) => state.passNo - t.pass <= holdPasses() + 1);
+  // Confirmed tags live through the hold. An unconfirmed read waits long enough to meet the
+  // next whole-frame scan (passes rotate between focus, whole frame and centre), but not so
+  // long that two chance misreads far apart in time could add up to a confirmation.
+  state.tracks = state.tracks.filter((t) => (t.hits >= CONFIRM_HITS
+    ? isHeld(t, now) || state.passNo - t.pass <= RECHECK_PASSES
+    : state.passNo - t.pass <= 4 || now - t.at <= 300));
   state.lastMs = ms;
   noteLatency(ms);
   const dt = state.detTimes;
@@ -741,7 +778,20 @@ function onResult(markers, ms, ref) {
 }
 
 // Confirmed tags that belong on screen now.
-const visibleTracks = () => state.tracks.filter((t) => t.hits >= CONFIRM_HITS && state.passNo - t.pass <= holdPasses());
+function visibleTracks() {
+  const now = performance.now();
+  return state.tracks.filter((t) => t.hits >= CONFIRM_HITS
+    && (t.pass === state.passNo || (isHeld(t, now) && onScreen(t))));
+}
+
+// Whether a held tag's centre (where the camera motion puts it now) is still on screen.
+function onScreen(t) {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw) return true;
+  const r = scanRect(vw, vh, false);
+  const [x, y] = centroid(shifted(t));
+  return x >= r.x && y >= r.y && x <= r.x + r.w && y <= r.y + r.h;
+}
 
 const centroid = (c) => [(c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4, (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4];
 const sideLen = (c) => Math.hypot(c[0][0] - c[2][0], c[0][1] - c[2][1]) / 1.414;
@@ -762,11 +812,12 @@ function addRead(m, ref) {
     best.corners = m.corners;
     best.ref = ref;
     best.pass = state.passNo;
+    best.at = performance.now();
     best.hits++;
-    if (best.hits === CONFIRM_HITS) best.confirmedAt = state.passNo;
+    if (best.hits === CONFIRM_HITS) best.confirmedTime = performance.now();
     if (best.hits >= CONFIRM_HITS) markSeen(m.id);
   } else if (!m.verified) {
-    state.tracks.push({ id: m.id, corners: m.corners, ref, pass: state.passNo, hits: 1 });
+    state.tracks.push({ id: m.id, corners: m.corners, ref, pass: state.passNo, at: performance.now(), hits: 1 });
   }
 }
 
@@ -873,7 +924,8 @@ function draw(src) {
   const P = (p) => [(p[0] - vw / 2) * s + cw / 2, (p[1] - vh / 2) * s + ch / 2];
   if (state.area === 'center') drawScanArea(scanRect(vw, vh, true), P, dpr);
   // All outlines first, then all labels, so a box can never cover another tag's number.
-  const shown = visibleTracks().map((t) => ({ id: t.id, q: shifted(t).map(P), a: trackAlpha(t) }));
+  const now = performance.now();
+  const shown = visibleTracks().map((t) => ({ id: t.id, q: shifted(t).map(P), a: displayAlpha(t, now) })).filter((m) => m.a > 0.01);
   for (const m of shown) drawBox(m.id, m.q, m.a, dpr);
   for (const m of shown) drawLabel(m.id, m.q, m.a, dpr);
 }
