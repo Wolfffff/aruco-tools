@@ -27,7 +27,7 @@ Phone-first ArUco / AprilTag tools. Static site, no build step, nothing leaves t
 
 ## Marker sheets
 
-Pick a set, IDs (`0-11`, `3, 7, 20-24`) and the black-square size in mm, then print at 100% scale. Opens on the set the reader last used.
+Print-ready sheets laid out in millimetres: pick a set, paper (A4 or Letter, portrait or landscape) and the black-square size, then either fill whole pages from a starting ID or list IDs (`0-11`, `3, 7, 20-24`). Optional labels and cut lines; each page has a footer and a 10 mm scale bar to check print size with a ruler. Print at 100% scale. Opens on the set the reader last used.
 
 ## Credits
 
