@@ -46,9 +46,17 @@ const AREA_OPTIONS = [['auto', 'Auto'], ['full', 'Whole frame'], ['center', 'Far
 // A tag is shown only after it is read twice at the same place, which removes nearly
 // all one-frame misreads of textures and text.
 const CONFIRM_HITS = 2;
-// Tags are aged in detection passes, not milliseconds. In auto mode a tag may only be
-// visible to every other pass (whole frame vs center), so it gets one pass of grace.
-const passGrace = () => (state.area === 'auto' ? 1 : 0);
+// Tags are aged in detection passes, not milliseconds. A confirmed tag that a pass misses
+// (usually motion blur) is held at its predicted position for up to two passes (~60 ms),
+// long enough to bridge a blurry frame, short enough not to linger. In auto mode a tag may
+// only be visible to every other pass (whole frame vs center), so it gets one more.
+const holdPasses = () => (state.area === 'auto' ? 3 : 2);
+
+// Where a track should be `ahead` passes after its last read, from its recent motion.
+function predict(t, ahead) {
+  if (!t.vel || ahead <= 0) return t.corners;
+  return t.corners.map((p, i) => [p[0] + t.vel[i][0] * ahead, p[1] + t.vel[i][1] * ahead]);
+}
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -397,7 +405,16 @@ function sendFrame() {
   const w = Math.round(r.w * scale), h = Math.round(r.h * scale);
   state.scanW = w; state.scanH = h;
   const seq = ++frameSeq;
-  const msg = { width: w, height: h, dict: setKey(), roi: { x: r.x, y: r.y, scale }, correct: state.correct, seq };
+  // Confirmed tags and where they should be in this frame, in scan pixels, so the worker
+  // can re-check those spots if its full scan misses them.
+  const expect = [];
+  for (const t of state.tracks) {
+    if (t.hits < CONFIRM_HITS || state.passNo - t.pass > holdPasses()) continue;
+    const c = predict(t, state.passNo + 1 - t.pass).map((p) => [(p[0] - r.x) * scale, (p[1] - r.y) * scale]);
+    const [mx, my] = centroid(c);
+    if (mx >= 0 && my >= 0 && mx < w && my < h) expect.push({ id: t.id, corners: c });
+  }
+  const msg = { width: w, height: h, dict: setKey(), roi: { x: r.x, y: r.y, scale }, correct: state.correct, seq, expect };
   worker.busy = true;
   if (bitmapPath) {
     createImageBitmap(video).then((bitmap) => {
@@ -453,7 +470,7 @@ function onResult(markers, ms) {
   const now = performance.now();
   state.passNo++;
   for (const m of markers) addRead(m);
-  state.tracks = state.tracks.filter((t) => state.passNo - t.pass <= passGrace() + 2);
+  state.tracks = state.tracks.filter((t) => state.passNo - t.pass <= holdPasses() + 1);
   state.lastMs = ms;
   const dt = state.detTimes;
   if (dt.length) state.passGap = state.passGap * 0.8 + Math.min(1000, now - dt[dt.length - 1]) * 0.2;
@@ -462,7 +479,7 @@ function onResult(markers, ms) {
 }
 
 // Confirmed tags that belong on the frame now shown.
-const visibleTracks = () => state.tracks.filter((t) => t.hits >= CONFIRM_HITS && state.passNo - t.pass <= passGrace());
+const visibleTracks = () => state.tracks.filter((t) => t.hits >= CONFIRM_HITS && state.passNo - t.pass <= holdPasses());
 
 const centroid = (c) => [(c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4, (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4];
 const sideLen = (c) => Math.hypot(c[0][0] - c[2][0], c[0][1] - c[2][1]) / 1.414;
@@ -473,18 +490,22 @@ function addRead(m) {
   let best = null, bestD = Infinity;
   for (const t of state.tracks) {
     if (t.id !== m.id || t.pass === state.passNo) continue;
-    const [tx, ty] = centroid(t.corners);
+    // Compare with where the tag should be now, so fast motion still matches.
+    const [tx, ty] = centroid(predict(t, state.passNo - t.pass));
     const d = Math.hypot(tx - cx, ty - cy);
     if (d < reach && d < bestD) { best = t; bestD = d; }
   }
   if (best) {
-    // No smoothing: the corners belong to the frame on screen, so they are already exact.
+    const gap = state.passNo - best.pass;
+    const vel = m.corners.map((p, i) => [(p[0] - best.corners[i][0]) / gap, (p[1] - best.corners[i][1]) / gap]);
+    best.vel = best.vel ? best.vel.map((v, i) => [v[0] * 0.4 + vel[i][0] * 0.6, v[1] * 0.4 + vel[i][1] * 0.6]) : vel;
+    // No smoothing of position: the corners belong to the frame on screen, so they are exact.
     best.corners = m.corners;
     best.pass = state.passNo;
     best.hits++;
     if (best.hits >= CONFIRM_HITS) markSeen(m.id);
-  } else {
-    state.tracks.push({ id: m.id, corners: m.corners, pass: state.passNo, hits: 1 });
+  } else if (!m.verified) {
+    state.tracks.push({ id: m.id, corners: m.corners, pass: state.passNo, hits: 1, vel: null });
   }
 }
 
@@ -590,7 +611,7 @@ function draw() {
   octx.drawImage(shot.canvas, 0, 0);
   const P = (p) => [(p[0] - shot.vw / 2) * shot.s + cw / 2, (p[1] - shot.vh / 2) * shot.s + ch / 2];
   if (state.area === 'center') drawScanArea(scanRect(shot.vw, shot.vh, true), P, dpr);
-  for (const t of visibleTracks()) drawMarker(t.id, t.corners.map(P), 1, dpr);
+  for (const t of visibleTracks()) drawMarker(t.id, predict(t, state.passNo - t.pass).map(P), 1, dpr);
 }
 
 function drawScanArea(r, P, dpr) {

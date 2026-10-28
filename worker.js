@@ -93,7 +93,7 @@ const CELL = 8;
 const MARGIN = 2;
 const MIN_CONTRAST = 45; // grey levels between darkest and brightest pixel in the candidate
 
-function decode(det, candidate, maxErrors) {
+function decode(det, candidate, maxErrors, verifying = false) {
   const n = det.dictionary.markSize; // cells across, black border included
   const size = n * CELL;
   if (det.homography.data.length !== size * size) det.homography = new CV.Image(size, size, new Uint8Array(size * size));
@@ -141,7 +141,8 @@ function decode(det, candidate, maxErrors) {
   }
   // Blur leaves a few in-between cells on real tags. Tolerate a handful, but only when
   // the rest of the code then matches exactly (or within the chosen correction).
-  const blurAllowance = Math.max(1, Math.floor(det.dictionary.nBits / 8));
+  // When re-checking a known tag (only its own ID is accepted), allow twice as many.
+  const blurAllowance = Math.max(1, Math.floor(det.dictionary.nBits / (verifying ? 4 : 8)));
   if (unsure > blurAllowance + maxErrors) return null;
   if (ones === 0) return null; // an all-black square is not a tag
 
@@ -175,17 +176,23 @@ function plausible(q) {
    following), rewritten on typed arrays with integer math and no per-pixel objects.
    These three stages were ~85% of the time per frame. */
 
-const buf = { w: 0, h: 0 };
+// `buf` is the working set the pixel functions read; it points at the whole scan, or at a
+// small crop while re-checking where a known tag should be.
+const scanBuf = { w: 0, h: 0 };
+const roiBuf = { w: 0, h: 0 };
+let buf = scanBuf;
 
 function ensureBuffers(w, h) {
   if (buf.w === w && buf.h === h) return;
   buf.w = w; buf.h = h;
-  buf.gray = new Uint8Array(w * h);
-  buf.tmp = new Uint8Array(w * h);
-  // Binary image with a one-pixel zero border, as the contour tracer expects. Borders
-  // are never written, so allocating once keeps them zero.
-  buf.labels = new Int32Array((w + 2) * (h + 2));
-  buf.pts = new Int32Array(8192);
+  // Grow-only and reused: the re-check crop changes size every frame.
+  const n = w * h, L = (w + 2) * (h + 2);
+  if (!buf.gray || buf.gray.length < n) { buf.gray = new Uint8Array(n); buf.tmp = new Uint8Array(n); }
+  // The contour tracer needs a zero border around the image; with a new width the border
+  // lands on different cells, so clear the part in use.
+  if (!buf.labels || buf.labels.length < L) buf.labels = new Int32Array(L);
+  else buf.labels.fill(0, 0, L);
+  if (!buf.pts) buf.pts = new Int32Array(8192);
 }
 
 function grayscale(rgba, w, h) {
@@ -291,6 +298,54 @@ function findContours(minLen) {
   return contours;
 }
 
+// Track-then-verify: a tag seen in recent frames that the full scan missed (usually
+// motion blur) is looked for again in a small area around where it should be, trying
+// every threshold setting and allowing error correction. Only the same ID is accepted,
+// which is far safer than detecting from scratch, so this cannot add false reads.
+function verifyExpected(det, expect, found, w, h) {
+  const out = [];
+  for (const e of expect) {
+    const xs = e.corners.map((c) => c[0]), ys = e.corners.map((c) => c[1]);
+    const cx = (xs[0] + xs[1] + xs[2] + xs[3]) / 4, cy = (ys[0] + ys[1] + ys[2] + ys[3]) / 4;
+    const size = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    if (found.some((m) => m.id === e.id && Math.hypot(m.cx - cx, m.cy - cy) < size)) continue;
+    const pad = Math.max(12, size * 0.45);
+    const x0 = Math.max(0, Math.floor(Math.min(...xs) - pad)), y0 = Math.max(0, Math.floor(Math.min(...ys) - pad));
+    const x1 = Math.min(w, Math.ceil(Math.max(...xs) + pad)), y1 = Math.min(h, Math.ceil(Math.max(...ys) + pad));
+    const rw = x1 - x0, rh = y1 - y0;
+    if (rw < 16 || rh < 16) continue;
+    // Copy the crop of the scan's grayscale into the small working set.
+    const full = scanBuf.gray;
+    buf = roiBuf;
+    ensureBuffers(rw, rh);
+    for (let y = 0; y < rh; y++) buf.gray.set(full.subarray((y0 + y) * w + x0, (y0 + y) * w + x0 + rw), y * rw);
+    const grey = det.grey;
+    det.grey = new CV.Image(rw, rh, buf.gray);
+    det.dictionary.tau = det.correctable + 1;
+    let hit = null;
+    for (const p of PASSES) {
+      adaptiveThreshold(p.kernel, p.thresh);
+      let cands = det.findCandidates(findContours(8), 8, 0.05, 8);
+      cands = det.clockwiseCorners(cands).filter(plausible);
+      for (const c of cands) {
+        const m = decode(det, c, det.correctable, true);
+        if (m && m.id === e.id) { hit = m; break; }
+      }
+      if (hit) break;
+    }
+    det.grey = grey;
+    buf = scanBuf;
+    if (hit) {
+      hit.corners = hit.corners.map((c) => ({ x: c.x + x0, y: c.y + y0 }));
+      hit.cx = (hit.corners[0].x + hit.corners[2].x) / 2;
+      hit.cy = (hit.corners[0].y + hit.corners[2].y) / 2;
+      hit.verified = true;
+      out.push(hit);
+    }
+  }
+  return out;
+}
+
 function detect(det, rgba, w, h, maxErrors, timings) {
   const p = PASSES[det.pass];
   let t = performance.now();
@@ -320,6 +375,16 @@ function detect(det, rgba, w, h, maxErrors, timings) {
   return out;
 }
 
+function detectAndVerify(det, rgba, w, h, maxErrors, expect, timings) {
+  const found = detect(det, rgba, w, h, maxErrors, timings);
+  if (expect?.length) {
+    const t = performance.now();
+    found.push(...verifyExpected(det, expect, found, w, h));
+    if (timings) timings.verify = performance.now() - t;
+  }
+  return found;
+}
+
 // Frames arrive either as RGBA pixels from the page, or as an ImageBitmap of the whole
 // camera frame plus the crop to scan. The bitmap path keeps scaling and the pixel
 // readout off the page's thread, where they would compete with drawing the screen.
@@ -336,7 +401,7 @@ function pixelsFromBitmap(bitmap, r, w, h) {
 }
 
 onmessage = (e) => {
-  const { width, height, buffer, bitmap, crop, dict, roi, correct, seq, profile } = e.data;
+  const { width, height, buffer, bitmap, crop, dict, roi, correct, seq, profile, expect } = e.data;
   if (e.data.warm) {
     // Load the marker set and compute its error budget before the first frame needs it.
     try { getDetector(e.data.warm); } catch {}
@@ -359,7 +424,7 @@ onmessage = (e) => {
     if (timings) timings.readout = performance.now() - t0;
     const det = getDetector(dict);
     const maxErrors = correct ? det.correctable : 0;
-    const found = detect(det, rgba, width, height, maxErrors, timings);
+    const found = detectAndVerify(det, rgba, width, height, maxErrors, expect, timings);
     // Stick with a threshold setting while it works; rotate through the others when it doesn't.
     if (found.length) det.misses = 0;
     else if (++det.misses >= 2) { det.pass = (det.pass + 1) % PASSES.length; det.misses = 0; }
@@ -368,6 +433,7 @@ onmessage = (e) => {
       id: m.id,
       corners: m.corners.map((c) => [c.x / s + ox, c.y / s + oy]),
       err: m.err,
+      verified: !!m.verified,
     }));
   } catch (err) {
     error = String(err);

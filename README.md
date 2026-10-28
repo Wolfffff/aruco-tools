@@ -11,6 +11,7 @@ Phone-first ArUco / AprilTag tools. Static site, no build step, nothing leaves t
 - Detection runs in Web Workers (two on 4+ core phones), once per camera frame; frames reach the workers as GPU bitmaps so scaling and pixel readout never block the page
 - Typed-array pixel core (grayscale, adaptive threshold, contour tracing) with results identical to js-aruco2
 - Offline-first: opens from the phone's cache instantly, updates in the background; skips the start tap when camera access is already granted
+- Track-then-verify: a confirmed tag missed by a pass (motion blur) is re-checked around its predicted position with every threshold setting, accepting only the same ID, and held for at most two passes; cuts flicker while moving without adding false reads
 - Frame-synced display: the screen shows the exact frame that was analyzed, so outlines never lag or linger when the camera moves
 - Auto range: alternates full-frame and 2× center passes so near and far tags both read
 - Strict decoding: solid black border, minimum contrast, no ambiguous cells, exact code match; a tag must be read twice in a row before it is shown
