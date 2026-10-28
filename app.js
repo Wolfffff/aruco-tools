@@ -236,10 +236,22 @@ function updateMotion(src, vw, vh) {
 }
 
 // A track's corners as they would appear in the frame described by `to` (default: now).
-function shifted(t, to = motion.M) {
+function shifted(t, to = motion.M, corners = t.corners) {
   const R = compose(to, invert(t.ref));
   const cx = video.videoWidth / 2, cy = video.videoHeight / 2;
-  return t.corners.map((c) => { const p = apply(R, [c[0] - cx, c[1] - cy]); return [p[0] + cx, p[1] + cy]; });
+  return corners.map((c) => { const p = apply(R, [c[0] - cx, c[1] - cy]); return [p[0] + cx, p[1] + cy]; });
+}
+
+// Each new read corrects where the motion tracking had put a tag by a pixel or few (more
+// while the camera swings and the picture blurs). Drawn as a jump, that is jitter, so the
+// outline glides the correction in: the offset to the old outline decays over GLIDE_MS.
+// Short enough that a tag moved by hand is followed without visible lag.
+const GLIDE_MS = 70;
+function drawnCorners(t, now) {
+  if (!t.err) return t.corners;
+  const k = Math.exp(-(now - t.errAt) / GLIDE_MS);
+  if (k < 0.02) { t.err = null; return t.corners; }
+  return t.corners.map((c, i) => [c[0] + t.err[i][0] * k, c[1] + t.err[i][1] * k]);
 }
 
 const store = {
@@ -809,12 +821,20 @@ function addRead(m, ref) {
     if (d < reach && d < bestD) { best = t; bestD = d; }
   }
   if (best) {
+    const now = performance.now();
+    // Where the outline is drawn now, in this read's frame, minus where the read puts it.
+    const was = shifted(best, ref, drawnCorners(best, now));
+    const err = was.map((p, i) => [p[0] - m.corners[i][0], p[1] - m.corners[i][1]]);
+    // A big difference is a real move (or a bad prediction): show it at once.
+    const glide = Math.max(...err.map((e) => Math.hypot(e[0], e[1]))) < reach * 0.5;
+    best.err = glide ? err : null;
+    best.errAt = now;
     best.corners = m.corners;
     best.ref = ref;
     best.pass = state.passNo;
-    best.at = performance.now();
+    best.at = now;
     best.hits++;
-    if (best.hits === CONFIRM_HITS) best.confirmedTime = performance.now();
+    if (best.hits === CONFIRM_HITS) best.confirmedTime = now;
     if (best.hits >= CONFIRM_HITS) markSeen(m.id);
   } else if (!m.verified) {
     state.tracks.push({ id: m.id, corners: m.corners, ref, pass: state.passNo, at: performance.now(), hits: 1 });
@@ -823,7 +843,11 @@ function addRead(m, ref) {
 
 let seenDirty = true;
 function markSeen(id) {
-  if (!state.seen.has(id)) { seenDirty = true; navigator.vibrate?.(12); }
+  if (!state.seen.has(id)) {
+    seenDirty = true;
+    // Browsers refuse to vibrate before the first touch (the app opens straight to the camera).
+    if (navigator.userActivation?.hasBeenActive ?? true) navigator.vibrate?.(12);
+  }
   state.seen.set(id, (state.seen.get(id) || 0) + 1);
 }
 
@@ -925,7 +949,7 @@ function draw(src) {
   if (state.area === 'center') drawScanArea(scanRect(vw, vh, true), P, dpr);
   // All outlines first, then all labels, so a box can never cover another tag's number.
   const now = performance.now();
-  const shown = visibleTracks().map((t) => ({ id: t.id, q: shifted(t).map(P), a: displayAlpha(t, now) })).filter((m) => m.a > 0.01);
+  const shown = visibleTracks().map((t) => ({ id: t.id, q: shifted(t, motion.M, drawnCorners(t, now)).map(P), a: displayAlpha(t, now) })).filter((m) => m.a > 0.01);
   for (const m of shown) drawBox(m.id, m.q, m.a, dpr);
   for (const m of shown) drawLabel(m.id, m.q, m.a, dpr);
 }
@@ -1353,14 +1377,8 @@ startCamera();
   }, () => {});
 })();
 
+// Pages come from the network first (see sw.js), so a new release shows the next time the
+// app is opened. The page never reloads itself: that would ask for the camera again.
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
-  // An update was installed in the background: load it right away if the camera is not
-  // showing yet, otherwise the next time the app goes to the background.
-  const hadController = !!navigator.serviceWorker.controller;
-  navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (!hadController) return; // first install, not an update
-    if (!state.revealed) location.reload();
-    else document.addEventListener('visibilitychange', () => { if (document.hidden) location.reload(); });
-  });
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }

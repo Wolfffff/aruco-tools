@@ -1,7 +1,7 @@
-// Offline-first: the app is served from the phone immediately. A release bumps VERSION
-// here together with the ?v= numbers in the pages, and installing the new version
-// downloads every file below in one go, so a page and its scripts never mix releases.
-const VERSION = 29;
+// Works offline: every file is cached. A release bumps VERSION here together with the ?v=
+// numbers in the pages, and installing the new version downloads every file below in one
+// go, so a page and its scripts never mix releases.
+const VERSION = 30;
 const CACHE = 'aruco-tools-v' + VERSION;
 const DICTIONARIES = [
   'aruco_4x4_1000', 'aruco_5x5_1000', 'aruco_6x6_1000', 'aruco_7x7_1000', 'aruco_default_opencv',
@@ -39,16 +39,26 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
-  e.respondWith(caches.match(req, { ignoreSearch: req.mode === 'navigate' }).then((hit) => {
-    if (hit) {
-      // Keep static files fresh in the background. Pages are left to the next release,
-      // so a page can never point at scripts this cache does not have.
-      if (req.mode !== 'navigate') e.waitUntil(refresh(req).catch(() => {}));
-      return hit;
-    }
-    return refresh(req);
+  if (req.mode === 'navigate') { e.respondWith(page(req)); return; }
+  e.respondWith(caches.match(req).then((hit) => {
+    if (!hit) return refresh(req);
+    e.waitUntil(refresh(req).catch(() => {})); // keep static files fresh in the background
+    return hit;
   }));
 });
+
+// Pages come from the network when it answers quickly, so opening the app always gets the
+// latest release without a reload later (a reload would ask for the camera again).
+// Offline or slow, the cached page is used. A page fetched here is not cached: the cache
+// keeps the page installed with its own scripts, so offline it never points at missing ones.
+const PAGE_WAIT_MS = 1500;
+function page(req) {
+  const net = fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' });
+  const cached = () => caches.match(req, { ignoreSearch: true });
+  const late = new Promise((r) => setTimeout(r, PAGE_WAIT_MS)).then(cached);
+  return Promise.race([net.catch(cached), late.then((hit) => hit || net)])
+    .then((res) => res || net);
+}
 
 // Fetches from the network and, for files the app ships, updates the cache.
 function refresh(req) {
