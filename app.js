@@ -50,7 +50,46 @@ const CONFIRM_HITS = 2;
 // (usually motion blur) is held at its predicted position for up to two passes (~60 ms),
 // long enough to bridge a blurry frame, short enough not to linger. In auto mode a tag may
 // only be visible to every other pass (whole frame vs center), so it gets one more.
-const holdPasses = () => (state.area === 'auto' ? 3 : 2);
+const holdPasses = () => (state.area === 'auto' ? 5 : 4);
+
+// One Euro filter (Casiez et al.): smooths hard when a value is nearly still (removes
+// jitter) and lightly when it moves fast (no visible lag). Units: camera pixels, seconds.
+class OneEuro {
+  constructor(minCutoff = 1.5, beta = 0.04, dCutoff = 1) {
+    this.minCutoff = minCutoff; this.beta = beta; this.dCutoff = dCutoff;
+    this.x = null; this.dx = 0; this.t = 0;
+  }
+  static alpha(cutoff, dt) { return 1 / (1 + 1 / (2 * Math.PI * cutoff * dt)); }
+  filter(x, t) {
+    if (this.x === null) { this.x = x; this.t = t; return x; }
+    const dt = Math.max(1e-3, t - this.t);
+    this.t = t;
+    const dx = (x - this.x) / dt;
+    this.dx += OneEuro.alpha(this.dCutoff, dt) * (dx - this.dx);
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
+    this.x += OneEuro.alpha(cutoff, dt) * (x - this.x);
+    return this.x;
+  }
+}
+
+// Updates what is drawn for a track: its read position, or while it is briefly missed its
+// predicted position (motion damped after two passes so it cannot fly off), smoothed.
+function updateDisplay(t, now) {
+  const missed = state.passNo - t.pass;
+  const target = missed === 0 ? t.corners : predict(t, Math.min(missed, 2));
+  if (!t.filters) t.filters = Array.from({ length: 8 }, () => new OneEuro());
+  const sec = now / 1000;
+  t.disp = target.map((p, i) => [t.filters[2 * i].filter(p[0], sec), t.filters[2 * i + 1].filter(p[1], sec)]);
+}
+
+// Fully visible while being read; fades out over the hold when missed, in over two passes
+// when first confirmed, so tags never pop in or out.
+function trackAlpha(t) {
+  const missed = state.passNo - t.pass;
+  const out = missed === 0 ? 1 : Math.max(0, 1 - missed / (holdPasses() + 1));
+  const fadeIn = Math.min(1, (state.passNo - (t.confirmedAt ?? state.passNo) + 1) / 2);
+  return out * fadeIn;
+}
 
 // Where a track should be `ahead` passes after its last read, from its recent motion.
 function predict(t, ahead) {
@@ -471,6 +510,7 @@ function onResult(markers, ms) {
   state.passNo++;
   for (const m of markers) addRead(m);
   state.tracks = state.tracks.filter((t) => state.passNo - t.pass <= holdPasses() + 1);
+  for (const t of state.tracks) if (t.hits >= CONFIRM_HITS) updateDisplay(t, now);
   state.lastMs = ms;
   const dt = state.detTimes;
   if (dt.length) state.passGap = state.passGap * 0.8 + Math.min(1000, now - dt[dt.length - 1]) * 0.2;
@@ -503,6 +543,7 @@ function addRead(m) {
     best.corners = m.corners;
     best.pass = state.passNo;
     best.hits++;
+    if (best.hits === CONFIRM_HITS) best.confirmedAt = state.passNo;
     if (best.hits >= CONFIRM_HITS) markSeen(m.id);
   } else if (!m.verified) {
     state.tracks.push({ id: m.id, corners: m.corners, pass: state.passNo, hits: 1, vel: null });
@@ -611,7 +652,10 @@ function draw() {
   octx.drawImage(shot.canvas, 0, 0);
   const P = (p) => [(p[0] - shot.vw / 2) * shot.s + cw / 2, (p[1] - shot.vh / 2) * shot.s + ch / 2];
   if (state.area === 'center') drawScanArea(scanRect(shot.vw, shot.vh, true), P, dpr);
-  for (const t of visibleTracks()) drawMarker(t.id, predict(t, state.passNo - t.pass).map(P), 1, dpr);
+  // All outlines first, then all labels, so a box can never cover another tag's number.
+  const shown = visibleTracks().filter((t) => t.disp).map((t) => ({ id: t.id, q: t.disp.map(P), a: trackAlpha(t) }));
+  for (const m of shown) drawBox(m.id, m.q, m.a, dpr);
+  for (const m of shown) drawLabel(m.id, m.q, m.a, dpr);
 }
 
 function drawScanArea(r, P, dpr) {
@@ -642,11 +686,11 @@ function brackets(q, len) {
   octx.stroke();
 }
 
-function drawMarker(id, q, alpha, dpr) {
-  const side = (Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]) + Math.hypot(q[2][0] - q[1][0], q[2][1] - q[1][1])) / 2;
+const quadSide = (q) => (Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]) + Math.hypot(q[2][0] - q[1][0], q[2][1] - q[1][1])) / 2;
+
+function drawBox(id, q, alpha, dpr) {
   octx.globalAlpha = alpha;
   octx.lineJoin = 'round';
-
   // One clean outline in the tag's colour, with a faint tint and a soft shadow for contrast.
   octx.beginPath();
   octx.moveTo(q[0][0], q[0][1]);
@@ -660,12 +704,16 @@ function drawMarker(id, q, alpha, dpr) {
   octx.lineWidth = 2.5 * dpr;
   octx.stroke();
   octx.shadowBlur = 0;
+  octx.globalAlpha = 1;
+}
 
-  // ID label centred above the tag. Anchored to the tag's centre and top edge, which move
-  // smoothly as it turns (a corner-anchored label jumps whenever another corner becomes
-  // the highest). Size steps in 2 px increments so it does not jitter with the tag.
+// ID label centred above the tag. Anchored to the tag's centre and top edge, which move
+// smoothly as it turns (a corner-anchored label jumps whenever another corner becomes
+// the highest). Size steps in 2 px increments so it does not jitter with the tag.
+function drawLabel(id, q, alpha, dpr) {
   const step = 2 * dpr;
-  const fs = Math.max(12 * dpr, Math.min(20 * dpr, Math.round((side * 0.2) / step) * step));
+  const fs = Math.max(12 * dpr, Math.min(20 * dpr, Math.round((quadSide(q) * 0.2) / step) * step));
+  octx.globalAlpha = alpha;
   octx.font = `700 ${fs}px -apple-system, system-ui, Roboto, sans-serif`;
   const label = String(id);
   const tw = octx.measureText(label).width;
@@ -673,9 +721,12 @@ function drawMarker(id, q, alpha, dpr) {
   const top = Math.min(q[0][1], q[1][1], q[2][1], q[3][1]);
   const h = fs * 1.5, w = Math.max(h, tw + fs * 0.9);
   const ly = Math.max(h / 2 + 2 * dpr, top - h / 2 - 6 * dpr);
+  octx.shadowColor = 'rgba(0,0,0,0.35)';
+  octx.shadowBlur = 4 * dpr;
   octx.fillStyle = color(id);
   roundRect(lx - w / 2, ly - h / 2, w, h, h / 2);
   octx.fill();
+  octx.shadowBlur = 0;
   octx.fillStyle = '#000';
   octx.textAlign = 'center';
   octx.textBaseline = 'middle';
