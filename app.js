@@ -88,6 +88,10 @@ async function startCamera() {
   if (!navigator.mediaDevices?.getUserMedia) {
     return showError('No camera access on this page. Open it over https in Safari or Chrome.');
   }
+  const btn = $('start');
+  btn.disabled = true;
+  btn.textContent = 'Starting camera…';
+  video.classList.remove('ready');
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
@@ -100,6 +104,12 @@ async function startCamera() {
     });
     video.srcObject = stream;
     await video.play();
+    // iOS can paint the first frames before the video knows its real size, which shows
+    // as a small picture that then jumps to full screen. Reveal only a real frame.
+    await firstFrame();
+    video.classList.add('ready');
+    btn.disabled = false;
+    btn.textContent = 'Open camera';
     if (!$('settings').hidden) renderSettings(); // shows the new stream size after a switch
     state.track = stream.getVideoTracks()[0];
     setupTrackControls();
@@ -110,10 +120,27 @@ async function startCamera() {
     requestWakeLock();
     startLoops();
   } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Open camera';
     showError(e.name === 'NotAllowedError'
       ? 'Camera access was denied. Allow it for this site in your browser settings and reload.'
       : 'Could not open the camera: ' + (e.message || e.name));
   }
+}
+
+// Resolves once a frame with real dimensions has been presented (or after 2 s, as a fallback).
+function firstFrame() {
+  return new Promise((resolve) => {
+    const done = () => requestAnimationFrame(() => resolve());
+    const timer = setTimeout(done, 2000);
+    const check = () => {
+      if (video.videoWidth > 0) { clearTimeout(timer); done(); }
+      else if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(check);
+      else setTimeout(check, 30);
+    };
+    if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(check);
+    else check();
+  });
 }
 
 function setupTrackControls() {
