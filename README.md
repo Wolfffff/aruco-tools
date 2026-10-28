@@ -16,7 +16,9 @@ Phone-first ArUco / AprilTag tools. Static site, no build step, nothing leaves t
 - Optional 4K camera stream (Settings → More → Camera): same cost per pass, the center pass reads native pixels for roughly double the range
 - Tolerates a few blurred cells while still requiring an exact code match
 - Adaptive thresholding that cycles settings when nothing is found (dim light, big tags)
-- Torch and zoom where the phone exposes them; works offline after first load; add to home screen for full screen
+- Pinch to zoom: uses the camera's zoom where available, otherwise a digital zoom that also points detection at what you see
+- Bottom list shows a mini drawing of each tag read, its ID, and how many times it was read; tags in view are ringed
+- Torch where the phone exposes it; works offline after first load; add to home screen for full screen
 
 ## Marker sheets
 

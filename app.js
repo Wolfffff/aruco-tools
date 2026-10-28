@@ -66,6 +66,7 @@ const state = {
   pending: false,
   loopsStarted: false,
   track: null,
+  zoom: null, // { hw, min, max, step, value }: hw = the camera's own zoom, else digital
   tracks: [], // { id, corners, at, born, hits }
   seen: new Map(), // id -> frames read (confirmed only)
   detTimes: [],
@@ -103,6 +104,8 @@ async function startCamera() {
       },
     });
     video.srcObject = stream;
+    state.track = stream.getVideoTracks()[0];
+    setupTrackControls();
     await video.play();
     // iOS can paint the first frames before the video knows its real size, which shows
     // as a small picture that then jumps to full screen. Reveal only a real frame.
@@ -111,8 +114,6 @@ async function startCamera() {
     btn.disabled = false;
     btn.textContent = 'Open camera';
     if (!$('settings').hidden) renderSettings(); // shows the new stream size after a switch
-    state.track = stream.getVideoTracks()[0];
-    setupTrackControls();
     $('gate').hidden = true;
     $('top').hidden = false;
     $('bottom').hidden = false;
@@ -131,7 +132,11 @@ async function startCamera() {
 // Resolves once a frame with real dimensions has been presented (or after 2 s, as a fallback).
 function firstFrame() {
   return new Promise((resolve) => {
-    const done = () => requestAnimationFrame(() => resolve());
+    let settled = false;
+    const finish = () => { if (!settled) { settled = true; resolve(); } };
+    // Wait one paint so the frame is on screen, but never depend on paints alone:
+    // they stop entirely while the page is in the background.
+    const done = () => { requestAnimationFrame(finish); setTimeout(finish, 100); };
     const timer = setTimeout(done, 2000);
     const check = () => {
       if (video.videoWidth > 0) { clearTimeout(timer); done(); }
@@ -150,16 +155,66 @@ function setupTrackControls() {
   if (caps.exposureMode?.includes('continuous')) adv.exposureMode = 'continuous';
   if (Object.keys(adv).length) state.track.applyConstraints({ advanced: [adv] }).catch(() => {});
   $('torch').hidden = !caps.torch;
-  if (caps.zoom && caps.zoom.max > caps.zoom.min) {
-    const z = $('zoom');
-    z.min = caps.zoom.min;
-    z.max = Math.min(caps.zoom.max, 10);
-    z.step = caps.zoom.step || 0.1;
-    z.value = state.track.getSettings?.().zoom || caps.zoom.min;
-    $('zoomVal').textContent = (+z.value).toFixed(1) + '×';
-    $('zoomWrap').hidden = false;
-  }
+  // Use the camera's own zoom where the browser exposes it; otherwise zoom digitally.
+  const hw = caps.zoom && caps.zoom.max > caps.zoom.min;
+  state.zoom = hw
+    ? { hw, min: caps.zoom.min, max: Math.min(caps.zoom.max, 10), step: caps.zoom.step || 0.1, value: state.track.getSettings?.().zoom || caps.zoom.min }
+    : { hw, min: 1, max: 4, step: 0.01, value: 1 };
+  applyDigitalZoom();
 }
+
+/* ---------- zoom (pinch on the picture) ---------- */
+
+// Digital zoom factor: 1 with camera zoom. The video is scaled on screen and detection
+// crops to the visible area, so the pixel budget goes to what you are looking at.
+const digitalZoom = () => (state.zoom && !state.zoom.hw ? state.zoom.value : 1);
+
+function applyDigitalZoom() {
+  const dz = digitalZoom();
+  video.style.transform = dz === 1 ? '' : `scale(${dz})`;
+}
+
+let zoomQueued = false;
+function setZoom(value) {
+  const z = state.zoom;
+  if (!z) return;
+  z.value = Math.min(z.max, Math.max(z.min, Math.round(value / z.step) * z.step));
+  showZoomHint();
+  if (!z.hw) return applyDigitalZoom();
+  // Coalesce to one camera update per frame; pinches fire far more often than that.
+  if (zoomQueued) return;
+  zoomQueued = true;
+  requestAnimationFrame(() => {
+    zoomQueued = false;
+    state.track?.applyConstraints({ advanced: [{ zoom: z.value }] }).catch(() => {});
+  });
+}
+
+let hintTimer = 0;
+function showZoomHint() {
+  const z = state.zoom.value;
+  $('zoomHint').textContent = (Math.abs(z - Math.round(z)) < 0.05 ? String(Math.round(z)) : z.toFixed(1)) + '×';
+  $('zoomHint').classList.add('on');
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => $('zoomHint').classList.remove('on'), 900);
+}
+
+let pinch = null;
+const touchGap = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+$('stage').addEventListener('touchstart', (e) => {
+  if (e.touches.length === 2 && state.zoom) pinch = { d: touchGap(e.touches), z: state.zoom.value };
+}, { passive: true });
+$('stage').addEventListener('touchmove', (e) => {
+  if (!pinch || e.touches.length !== 2) return;
+  e.preventDefault();
+  setZoom(pinch.z * touchGap(e.touches) / pinch.d);
+}, { passive: false });
+$('stage').addEventListener('touchend', (e) => { if (e.touches.length < 2) pinch = null; });
+
+// Keep the zoom label just above the bottom panel, whatever its height.
+new ResizeObserver(([entry]) => {
+  document.documentElement.style.setProperty('--panel-h', entry.target.getBoundingClientRect().height + 'px');
+}).observe($('bottom'));
 
 function showError(msg) {
   $('err').textContent = msg;
@@ -191,8 +246,8 @@ const worker = new Worker('worker.js');
 
 // The part of the video frame being scanned, in video pixels.
 function scanRect(vw, vh, center) {
-  if (!center) return { x: 0, y: 0, w: vw, h: vh };
-  const w = Math.round(vw * 0.5), h = Math.round(vh * 0.5);
+  const f = (center ? 0.5 : 1) / digitalZoom(); // what is on screen, or the middle half of it
+  const w = Math.round(vw * f), h = Math.round(vh * f);
   return { x: (vw - w) >> 1, y: (vh - h) >> 1, w, h };
 }
 
@@ -201,10 +256,11 @@ function sendFrame() {
   if (!vw || video.readyState < 2) return;
   state.flip = !state.flip;
   const center = state.area === 'center' || (state.area === 'auto' && state.flip);
-  const full = Math.min(1, state.res / Math.max(vw, vh));
-  // The center pass upsamples 2x: same pixel budget as a whole-frame pass, double the reach.
-  const scale = center ? Math.min(2, full * 2) : full;
   const r = scanRect(vw, vh, center);
+  // Every pass gets the same pixel budget. Crops (the center pass, digital zoom) therefore
+  // read native pixels, and may upsample up to 2x so tiny tags have cells big enough to read.
+  const cropped = center || digitalZoom() > 1;
+  const scale = Math.min(cropped ? 2 : 1, state.res / Math.max(r.w, r.h));
   const w = Math.round(r.w * scale), h = Math.round(r.h * scale);
   if (grab.width !== w || grab.height !== h) { grab.width = w; grab.height = h; }
   gctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
@@ -304,9 +360,9 @@ function draw() {
   if (!vw) return;
 
   // Map video pixels to the screen the same way object-fit: cover does.
-  const s = Math.max(cw / vw, ch / vh);
-  const ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
-  const P = (p) => [p[0] * s + ox, p[1] * s + oy];
+  // (plus the digital zoom, which scales the video about its center).
+  const s = Math.max(cw / vw, ch / vh) * digitalZoom();
+  const P = (p) => [(p[0] - vw / 2) * s + cw / 2, (p[1] - vh / 2) * s + ch / 2];
 
   if (state.area === 'center') drawScanArea(scanRect(vw, vh, true), P, dpr);
 
@@ -318,7 +374,7 @@ function draw() {
     const age = now - t.at;
     const hold = timeout - 180; // stay solid until the last ~180 ms, then fade
     const alpha = state.paused || age < hold ? 1 : 1 - (age - hold) / 180;
-    drawMarker(t.id, t.corners.map(P), alpha, dpr, Math.min(1, (now - t.born) / 120));
+    drawMarker(t.id, t.corners.map(P), alpha, dpr);
   }
 }
 
@@ -350,57 +406,40 @@ function brackets(q, len) {
   octx.stroke();
 }
 
-function drawMarker(id, q, alpha, dpr, grow) {
-  const [cx, cy] = centroid(q);
+function drawMarker(id, q, alpha, dpr) {
   const side = (Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]) + Math.hypot(q[2][0] - q[1][0], q[2][1] - q[1][1])) / 2;
-
-  octx.lineJoin = 'round';
-  octx.lineCap = 'round';
   octx.globalAlpha = alpha;
+  octx.lineJoin = 'round';
 
-  // Tinted fill + outline on the tag itself.
-  octx.fillStyle = color(id, 0.28);
-  octx.strokeStyle = color(id);
-  octx.lineWidth = 3 * dpr;
+  // One clean outline in the tag's colour, with a faint tint and a soft shadow for contrast.
   octx.beginPath();
   octx.moveTo(q[0][0], q[0][1]);
   for (let i = 1; i < 4; i++) octx.lineTo(q[i][0], q[i][1]);
   octx.closePath();
+  octx.fillStyle = color(id, 0.14);
   octx.fill();
-  octx.stroke();
-
-  // Lock-on brackets just outside the tag; they snap in when a tag is confirmed.
-  const pad = 1.18 + (1 - grow) * 0.25;
-  const outer = q.map((p) => [cx + (p[0] - cx) * pad, cy + (p[1] - cy) * pad]);
-  const bl = Math.max(10 * dpr, side * 0.22);
-  octx.lineWidth = 7 * dpr;
-  octx.strokeStyle = 'rgba(0,0,0,0.55)';
-  brackets(outer, bl);
-  octx.lineWidth = 4 * dpr;
+  octx.shadowColor = 'rgba(0,0,0,0.45)';
+  octx.shadowBlur = 6 * dpr;
   octx.strokeStyle = color(id);
-  brackets(outer, bl);
+  octx.lineWidth = 2.5 * dpr;
+  octx.stroke();
+  octx.shadowBlur = 0;
 
-  // Corner 0 is the tag's own top-left: shows which way it faces.
-  octx.fillStyle = '#fff';
-  octx.beginPath();
-  octx.arc(q[0][0], q[0][1], 4 * dpr, 0, Math.PI * 2);
-  octx.fill();
-
-  // ID label above the tag.
-  const fs = Math.max(16 * dpr, Math.min(40 * dpr, side * 0.32));
-  octx.font = `700 ${fs}px ui-monospace, "SF Mono", Menlo, monospace`;
+  // ID label sitting just above the tag's highest corner.
+  const fs = Math.max(12 * dpr, Math.min(20 * dpr, side * 0.2));
+  octx.font = `700 ${fs}px -apple-system, system-ui, Roboto, sans-serif`;
   const label = String(id);
   const tw = octx.measureText(label).width;
-  const top = Math.min(outer[0][1], outer[1][1], outer[2][1], outer[3][1]);
-  const ly = Math.max(fs, top - fs * 0.75);
-  const padX = fs * 0.35, h = fs * 1.25;
+  const topPt = q.reduce((a, p) => (p[1] < a[1] ? p : a));
+  const h = fs * 1.5, w = Math.max(h, tw + fs * 0.9);
+  const lx = topPt[0], ly = Math.max(h / 2 + 2 * dpr, topPt[1] - h / 2 - 5 * dpr);
   octx.fillStyle = color(id);
-  roundRect(cx - tw / 2 - padX, ly - h / 2, tw + padX * 2, h, h * 0.25);
+  roundRect(lx - w / 2, ly - h / 2, w, h, h / 2);
   octx.fill();
   octx.fillStyle = '#000';
   octx.textAlign = 'center';
   octx.textBaseline = 'middle';
-  octx.fillText(label, cx, ly + fs * 0.04);
+  octx.fillText(label, lx, ly + fs * 0.05);
   octx.globalAlpha = 1;
 }
 
@@ -416,33 +455,39 @@ function roundRect(x, y, w, h, r) {
 
 /* ---------- readouts ---------- */
 
-let nowKey = null;
-let seenAt = 0;
 let statAt = 0;
+let seenAt = 0;
+let inViewKey = '';
+
+// Tiny drawings of tags for the list, from the same dictionary the detector uses.
+const miniCache = new Map(); // `${setKey}:${id}` -> svg markup
+let miniDict = null; // { base, dict } for the current family
+async function ensureMiniDict() {
+  const base = state.family.base;
+  if (miniDict?.base === base) return;
+  await loadDict(base);
+  const def = AR.DICTIONARIES[base];
+  const saved = def.tau;
+  def.tau = 1; // skip the library's slow distance scan; drawing does not need it
+  miniDict = { base, dict: new AR.Dictionary(base) };
+  def.tau = saved;
+  seenDirty = true;
+}
+function miniSvg(id) {
+  if (!miniDict || miniDict.base !== state.family.base) return '';
+  const k = miniDict.base + ':' + id;
+  if (!miniCache.has(k)) miniCache.set(k, miniDict.dict.generateSVG(id));
+  return miniCache.get(k);
+}
 
 function renderReadouts() {
   const now = performance.now();
-  const ids = [...new Set(state.tracks.filter((t) => t.hits >= CONFIRM_HITS && now - t.at < trackTimeout() - 100).map((t) => t.id))].sort((a, b) => a - b);
-  const key = ids.join(',');
-  if (key !== nowKey) {
-    nowKey = key;
-    const el = $('now');
-    el.replaceChildren();
-    if (!ids.length) {
-      const s = document.createElement('span');
-      s.className = 'none';
-      s.textContent = 'Point at a tag';
-      el.append(s);
-    }
-    for (const id of ids) {
-      const s = document.createElement('span');
-      s.className = 'id';
-      s.style.color = color(id);
-      s.textContent = id;
-      el.append(s);
-    }
+  const inView = new Set(state.tracks.filter((t) => t.hits >= CONFIRM_HITS && now - t.at < trackTimeout() - 100).map((t) => t.id));
+  const key = [...inView].sort((a, b) => a - b).join(',');
+  if (seenDirty || key !== inViewKey || (inView.size && now - seenAt > 400)) {
+    inViewKey = key;
+    renderSeen(inView);
   }
-  if (seenDirty || (ids.length && now - seenAt > 400)) renderSeen();
   if (state.showStats && now - statAt > 250) {
     statAt = now;
     $('stat').textContent = `${state.detTimes.length} reads/s · ${state.lastMs.toFixed(1)} ms · ${grab.width}×${grab.height}`;
@@ -450,27 +495,37 @@ function renderReadouts() {
   $('live').classList.toggle('live', !state.paused && state.detTimes.length > 0 && now - state.detTimes[state.detTimes.length - 1] < 500);
 }
 
-function renderSeen() {
+// One card per tag read so far: tiny tag, its ID, and how many frames it was read in.
+// Cards are kept by ID and only their text and state change between renders.
+const cards = new Map();
+function renderSeen(inView = new Set()) {
   seenDirty = false;
   seenAt = performance.now();
-  const el = $('seen');
-  el.replaceChildren();
-  const rows = [...state.seen.entries()].sort((a, b) => a[0] - b[0]);
-  if (!rows.length) {
-    const s = document.createElement('span');
-    s.className = 'hint';
-    s.textContent = 'Tags you read collect here';
-    el.append(s);
-  }
-  for (const [id, n] of rows) {
-    const s = document.createElement('span');
-    s.className = 'tag';
-    s.style.setProperty('--c', color(id));
-    s.textContent = id;
-    const b = document.createElement('b');
-    b.textContent = n;
-    s.append(b);
-    el.append(s);
+  ensureMiniDict();
+  const list = $('seen');
+  const ids = [...state.seen.keys()].sort((a, b) => a - b);
+  $('seenCount').textContent = ids.length ? `${ids.length} tag${ids.length === 1 ? '' : 's'} read` : 'No tags yet';
+  $('emptyHint').hidden = ids.length > 0;
+  for (const [id, el] of cards) if (!state.seen.has(id)) { el.remove(); cards.delete(id); }
+  let prev = null;
+  for (const id of ids) {
+    let el = cards.get(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'card';
+      el.style.setProperty('--c', color(id));
+      el.innerHTML = '<span class="mini"></span><span class="meta"><b></b><small></small></span>';
+      el.querySelector('b').textContent = id;
+      cards.set(id, el);
+    }
+    const mini = el.querySelector('.mini');
+    if (!mini.firstChild) mini.innerHTML = miniSvg(id);
+    el.querySelector('small').textContent = '×' + state.seen.get(id);
+    el.classList.toggle('live', inView.has(id));
+    // Keep DOM order sorted without re-inserting cards that are already in place.
+    const want = prev ? prev.nextSibling : list.firstChild;
+    if (want !== el) list.insertBefore(el, want);
+    prev = el;
   }
 }
 
@@ -560,11 +615,6 @@ $('torch').onclick = async (e) => {
     await state.track.applyConstraints({ advanced: [{ torch: on }] });
     btn.setAttribute('aria-pressed', on);
   } catch {}
-};
-$('zoom').oninput = (e) => {
-  const z = +e.target.value;
-  $('zoomVal').textContent = z.toFixed(1) + '×';
-  state.track?.applyConstraints({ advanced: [{ zoom: z }] }).catch(() => {});
 };
 $('clear').onclick = () => {
   state.seen.clear();
