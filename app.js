@@ -46,25 +46,10 @@ const AREA_OPTIONS = [['auto', 'Auto'], ['full', 'Whole frame'], ['center', 'Far
 // A tag is shown only after it is read twice at the same place, which removes nearly
 // all one-frame misreads of textures and text.
 const CONFIRM_HITS = 2;
-// Tags are aged in detection passes, not milliseconds. A confirmed tag that a pass misses
-// (usually motion blur) is held at its predicted position for up to two passes (~60 ms),
-// long enough to bridge a blurry frame, short enough not to linger. In auto mode a tag may
-// only be visible to every other pass (whole frame vs center), so it gets one more.
-// A confirmed tag a pass misses (usually motion blur) fades out over two passes (~60 ms)
-// instead of blinking off. In auto mode a tag may only be visible to every other pass
+// A confirmed tag a pass misses (usually motion blur) stays, moving with the camera, and
+// fades out over a few passes. In auto mode a tag may only be visible to every other pass
 // (whole frame vs center), so it gets one more.
-const holdPasses = () => (state.area === 'auto' ? 3 : 2);
-
-// What is drawn for a track. The display shows the exact frame that was analyzed, so the
-// read corners are already where the tag is: draw them as they are, with no averaging over
-// time (which always trails real motion). Only sub-pixel twitches of a still tag are
-// ignored. A briefly missed tag stays where it was last read while it fades.
-const DEAD_ZONE = 1.2; // camera pixels
-function updateDisplay(t) {
-  if (state.passNo !== t.pass) return;
-  if (!t.disp) { t.disp = t.corners; return; }
-  t.disp = t.corners.map((p, i) => (Math.hypot(p[0] - t.disp[i][0], p[1] - t.disp[i][1]) < DEAD_ZONE ? t.disp[i] : p));
-}
+const holdPasses = () => (state.area === 'auto' ? 4 : 3);
 
 // Fully visible while being read; fades out over the hold when missed, in over two passes
 // when first confirmed.
@@ -75,11 +60,68 @@ function trackAlpha(t) {
   return out * fadeIn;
 }
 
-// Where a track should be `ahead` passes after its last read, from its recent motion.
-function predict(t, ahead) {
-  if (!t.vel || ahead <= 0) return t.corners;
-  return t.corners.map((p, i) => [p[0] + t.vel[i][0] * ahead, p[1] + t.vel[i][1] * ahead]);
+/* ---------- camera motion ----------
+   The screen shows the live camera. Detection results describe a frame from a few tens of
+   milliseconds ago, so outlines are moved by how much the picture itself has moved since
+   that frame. Motion is measured between consecutive frames on a 160 px wide copy, by
+   matching column and row brightness profiles (integral projections): well under a
+   millisecond, and it captures what dominates handheld use, panning and tilting. */
+
+const MOTION_W = 160;
+const motionCanvas = document.createElement('canvas');
+const mctx = motionCanvas.getContext('2d');
+const motion = { cols: null, rows: null, x: 0, y: 0 }; // x, y: total picture shift in camera pixels
+
+// Profile derivatives: robust to exposure changes, which shift a profile but not its edges.
+function profiles(data, w, h) {
+  const cols = new Float32Array(w), rows = new Float32Array(h);
+  for (let y = 0, i = 1; y < h; y++) {
+    let r = 0;
+    for (let x = 0; x < w; x++, i += 4) { const g = data[i]; cols[x] += g; r += g; }
+    rows[y] = r;
+  }
+  const d = (p) => { const o = new Float32Array(p.length - 1); for (let i = 0; i < o.length; i++) o[i] = p[i + 1] - p[i]; return o; };
+  return { cols: d(cols), rows: d(rows) };
 }
+
+// Shift s (in profile samples, sub-sample precise) such that cur[i + s] ≈ prev[i].
+function matchShift(prev, cur, range) {
+  const n = prev.length;
+  let best = 0, bestCost = Infinity;
+  const costs = new Float32Array(2 * range + 1);
+  for (let s = -range; s <= range; s++) {
+    let c = 0, k = 0;
+    for (let i = Math.max(0, -s); i < Math.min(n, n - s); i++, k++) c += Math.abs(prev[i] - cur[i + s]);
+    c /= Math.max(1, k);
+    costs[s + range] = c;
+    if (c < bestCost) { bestCost = c; best = s; }
+  }
+  if (best === -range || best === range) return 0; // at the edge of the search: unreliable
+  const l = costs[best + range - 1], m = costs[best + range], r = costs[best + range + 1];
+  const den = l - 2 * m + r;
+  const sub = den > 0 ? (0.5 * (l - r)) / den : 0;
+  const shift = best + sub;
+  return Math.abs(shift) < 0.15 ? 0 : shift; // ignore sensor noise when the camera is still
+}
+
+function updateMotion(vw, vh) {
+  const w = MOTION_W, h = Math.max(16, Math.round((MOTION_W * vh) / vw));
+  if (motionCanvas.width !== w || motionCanvas.height !== h) {
+    motionCanvas.width = w; motionCanvas.height = h;
+    motion.cols = null;
+  }
+  mctx.drawImage(video, 0, 0, w, h);
+  const p = profiles(mctx.getImageData(0, 0, w, h).data, w, h);
+  if (motion.cols) {
+    const k = vw / w; // camera pixels per profile sample
+    motion.x += matchShift(motion.cols, p.cols, 14) * k;
+    motion.y += matchShift(motion.rows, p.rows, 14) * k;
+  }
+  motion.cols = p.cols; motion.rows = p.rows;
+}
+
+// A track's corners as they would appear in the current picture.
+const shifted = (t, to = motion) => t.corners.map((c) => [c[0] + to.x - t.ref.x, c[1] + to.y - t.ref.y]);
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -108,8 +150,6 @@ const state = {
   zoom: null, // { hw, min, max, step, value }: hw = the camera's own zoom, else digital
   tracks: [], // { id, corners, pass, hits }
   passNo: 0, // detection results received
-  shown: null, // the analyzed frame on screen: { canvas, s, vw, vh }
-  inflight: null, // the frame the worker is analyzing now
   seen: new Map(), // id -> frames read (confirmed only)
   entered: new Map(), // id -> when it last came into view; orders the list, newest first
   detTimes: [],
@@ -283,7 +323,7 @@ function firstShown() {
   return new Promise((resolve) => {
     const t0 = performance.now();
     const check = () => {
-      if (state.shown || state.switching || performance.now() - t0 > 1000) resolve();
+      if (state.passNo > 0 || state.switching || performance.now() - t0 > 1000) resolve();
       else setTimeout(check, 8);
     };
     check();
@@ -403,7 +443,7 @@ if (typeof createImageBitmap === 'function') {
 
 let frameSeq = 0;
 let shownSeq = 0;
-const inflight = new Map(); // seq -> screen shot of the frame being read
+const frameRef = new Map(); // seq -> picture shift when that frame was sent for reading
 
 // The part of the video frame being scanned, in video pixels.
 function scanRect(vw, vh, center) {
@@ -416,7 +456,7 @@ function sendFrame() {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || video.readyState < 2 || state.switching) return;
   const worker = workers.find((w) => !w.busy);
-  if (!worker) { state.pending = true; return; }
+  if (!worker) return; // every worker busy: skip this frame, the next one is moments away
   state.flip = !state.flip;
   const center = state.area === 'center' || (state.area === 'auto' && state.flip);
   const r = scanRect(vw, vh, center);
@@ -428,12 +468,13 @@ function sendFrame() {
   const w = Math.round(r.w * scale), h = Math.round(r.h * scale);
   state.scanW = w; state.scanH = h;
   const seq = ++frameSeq;
+  frameRef.set(seq, { x: motion.x, y: motion.y });
   // Confirmed tags and where they should be in this frame, in scan pixels, so the worker
   // can re-check those spots if its full scan misses them.
   const expect = [];
   for (const t of state.tracks) {
     if (t.hits < CONFIRM_HITS || state.passNo - t.pass > 2) continue;
-    const c = predict(t, state.passNo + 1 - t.pass).map((p) => [(p[0] - r.x) * scale, (p[1] - r.y) * scale]);
+    const c = shifted(t).map((p) => [(p[0] - r.x) * scale, (p[1] - r.y) * scale]);
     const [mx, my] = centroid(c);
     if (mx >= 0 && my >= 0 && mx < w && my < h) expect.push({ id: t.id, corners: c });
   }
@@ -442,26 +483,22 @@ function sendFrame() {
   if (bitmapPath) {
     createImageBitmap(video).then((bitmap) => {
       if (bitmap.width !== vw || bitmap.height !== vh) {
-        // Some browsers snapshot the raw, unrotated sensor frame. Painting or reading that
-        // would be sideways, so use the plain path on this phone from now on.
+        // Some browsers snapshot the raw, unrotated sensor frame. Reading that would be
+        // sideways, so use the plain path on this phone from now on.
         bitmap.close();
         bitmapPath = false;
         worker.busy = false;
-        sendFrame();
         return;
       }
-      inflight.set(seq, takeShot(bitmap, vw, vh)); // the same frame, sized for the screen
       worker.postMessage({ ...msg, bitmap, crop: r }, [bitmap]);
     }, () => {
-      // Snapshot failed (rare): fall back to reading pixels here from now on.
-      bitmapPath = false;
+      bitmapPath = false; // snapshot failed (rare): read pixels here from now on
       worker.busy = false;
     });
     return;
   }
   if (grab.width !== w || grab.height !== h) { grab.width = w; grab.height = h; }
   gctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
-  inflight.set(seq, takeShot(video, vw, vh));
   const img = gctx.getImageData(0, 0, w, h);
   worker.postMessage({ ...msg, buffer: img.data.buffer }, [img.data.buffer]);
 }
@@ -474,27 +511,20 @@ function onWorkerMessage(worker, data) {
     return;
   }
   const { markers, ms, error, seq } = data;
-  const shot = inflight.get(seq);
-  inflight.delete(seq);
-  if (seq > shownSeq && !state.paused && !state.switching) {
-    // Show the frame that was just analyzed, so outlines match the picture exactly.
-    shownSeq = seq;
-    if (shot) { releaseShot(state.shown); state.shown = shot; viewDirty = true; }
-    if (error) console.error(error);
-    else onResult(markers, ms);
-  } else {
-    releaseShot(shot); // a newer frame is already on screen
-  }
-  // A camera frame arrived while all workers were busy: process it right away.
-  if (state.pending) { state.pending = false; sendFrame(); }
+  const ref = frameRef.get(seq);
+  for (const k of frameRef.keys()) if (k <= seq) frameRef.delete(k);
+  // A result older than one already applied (two workers can finish out of order) is dropped.
+  if (seq <= shownSeq || !ref || state.paused || state.switching) return;
+  shownSeq = seq;
+  if (error) console.error(error);
+  else onResult(markers, ms, ref);
 }
 
-function onResult(markers, ms) {
+function onResult(markers, ms, ref) {
   const now = performance.now();
   state.passNo++;
-  for (const m of markers) addRead(m);
+  for (const m of markers) addRead(m, ref);
   state.tracks = state.tracks.filter((t) => state.passNo - t.pass <= holdPasses() + 1);
-  for (const t of state.tracks) if (t.hits >= CONFIRM_HITS) updateDisplay(t);
   state.lastMs = ms;
   const dt = state.detTimes;
   if (dt.length) state.passGap = state.passGap * 0.8 + Math.min(1000, now - dt[dt.length - 1]) * 0.2;
@@ -502,35 +532,33 @@ function onResult(markers, ms) {
   while (dt.length && now - dt[0] > 1000) dt.shift();
 }
 
-// Confirmed tags that belong on the frame now shown.
+// Confirmed tags that belong on screen now.
 const visibleTracks = () => state.tracks.filter((t) => t.hits >= CONFIRM_HITS && state.passNo - t.pass <= holdPasses());
 
 const centroid = (c) => [(c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4, (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4];
 const sideLen = (c) => Math.hypot(c[0][0] - c[2][0], c[0][1] - c[2][1]) / 1.414;
 
-function addRead(m) {
+// `ref` is the picture shift of the frame this read came from; tracks keep theirs, so any
+// two can be compared after removing the camera's motion between them.
+function addRead(m, ref) {
   const [cx, cy] = centroid(m.corners);
   const reach = Math.max(24, sideLen(m.corners));
   let best = null, bestD = Infinity;
   for (const t of state.tracks) {
     if (t.id !== m.id || t.pass === state.passNo) continue;
-    // Compare with where the tag should be now, so fast motion still matches.
-    const [tx, ty] = centroid(predict(t, state.passNo - t.pass));
+    const [tx, ty] = centroid(shifted(t, ref));
     const d = Math.hypot(tx - cx, ty - cy);
     if (d < reach && d < bestD) { best = t; bestD = d; }
   }
   if (best) {
-    const gap = state.passNo - best.pass;
-    const vel = m.corners.map((p, i) => [(p[0] - best.corners[i][0]) / gap, (p[1] - best.corners[i][1]) / gap]);
-    best.vel = best.vel ? best.vel.map((v, i) => [v[0] * 0.4 + vel[i][0] * 0.6, v[1] * 0.4 + vel[i][1] * 0.6]) : vel;
-    // No smoothing of position: the corners belong to the frame on screen, so they are exact.
     best.corners = m.corners;
+    best.ref = ref;
     best.pass = state.passNo;
     best.hits++;
     if (best.hits === CONFIRM_HITS) best.confirmedAt = state.passNo;
     if (best.hits >= CONFIRM_HITS) markSeen(m.id);
   } else if (!m.verified) {
-    state.tracks.push({ id: m.id, corners: m.corners, pass: state.passNo, hits: 1, vel: null });
+    state.tracks.push({ id: m.id, corners: m.corners, ref, pass: state.passNo, hits: 1 });
   }
 }
 
@@ -540,10 +568,15 @@ function markSeen(id) {
   state.seen.set(id, (state.seen.get(id) || 0) + 1);
 }
 
-// Detection follows new camera frames, so each frame is processed at most once.
-// While the worker is busy we only remember that a newer frame is waiting.
+// Every new camera frame: measure how the picture moved, paint it with the outlines
+// moved to match, and hand it to a free worker if there is one.
 function onVideoFrame() {
-  if (!state.paused) sendFrame(); // queues itself as pending if every worker is busy
+  if (state.paused || state.switching) return;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || video.readyState < 2) return;
+  updateMotion(vw, vh);
+  draw();
+  sendFrame();
 }
 
 function startLoops() {
@@ -560,20 +593,15 @@ function startLoops() {
     };
     requestAnimationFrame(tick);
   }
-  // Each loop books its next run first, so one bad frame can never freeze the screen.
+  // Readouts on their own loop; it books its next run first so an error cannot stop it.
   const paint = () => {
     requestAnimationFrame(paint);
-    draw();
     renderReadouts();
   };
   requestAnimationFrame(paint);
 }
 
 /* ---------- drawing ---------- */
-
-// Screen-sized buffers: one on screen, one per frame being analyzed. Recycled, not reallocated.
-const shotPool = [];
-let viewDirty = true;
 
 function screenSize() {
   const dpr = Math.min(devicePixelRatio || 1, 2); // 3x costs fill-rate on big phones for no visible gain
@@ -588,56 +616,28 @@ function paintVideo(ctx, source, vw, vh, cw, ch) {
   return s;
 }
 
-function takeShot(source, vw, vh) {
-  const { cw, ch } = screenSize();
-  const canvas = shotPool.pop() || document.createElement('canvas');
-  if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
-  const ctx = canvas.getContext('2d', { alpha: false });
-  const s = paintVideo(ctx, source, vw, vh, cw, ch);
-  return { canvas, s, vw, vh };
-}
-
-function releaseShot(shot) {
-  if (shot && shotPool.length < 4) shotPool.push(shot.canvas);
-}
-
 let lastVideoSize = '';
 
 function draw() {
   const { dpr, cw, ch } = screenSize();
-  // If the stream changes shape mid-session (rotation, a camera reconfiguring), drop
-  // tags and frames from the old shape rather than drawing them in the wrong place.
-  const size = video.videoWidth + 'x' + video.videoHeight;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  // If the stream changes shape mid-session (rotation, a camera reconfiguring), drop tags
+  // from the old shape rather than drawing them in the wrong place.
+  const size = vw + 'x' + vh;
   if (size !== lastVideoSize) {
-    if (lastVideoSize) { state.tracks = []; if (state.revealed && video.videoWidth) logEvent(`camera size ${size}`); }
+    if (lastVideoSize) { state.tracks = []; if (state.revealed && vw) logEvent(`camera size ${size}`); }
     lastVideoSize = size;
   }
   if (overlay.width !== cw || overlay.height !== ch) {
     if (state.revealed) logEvent(`screen size ${cw}×${ch}`);
-    overlay.width = cw; overlay.height = ch; viewDirty = true;
+    overlay.width = cw; overlay.height = ch;
   }
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const shot = state.shown;
-  if (shot && (state.switching || shot.canvas.width !== cw || shot.canvas.height !== ch)) {
-    // Never fall back to the raw video once the camera is showing (a second source can be
-    // cropped differently); stretch the last analyzed frame until the next one is ready.
-    octx.drawImage(shot.canvas, 0, 0, cw, ch);
-    return;
-  }
-  // Before the first analyzed frame (behind the start screen), show the live camera.
-  if (!shot) {
-    octx.fillStyle = '#000';
-    octx.fillRect(0, 0, cw, ch);
-    if (vw && video.readyState >= 2) paintVideo(octx, video, vw, vh, cw, ch);
-    return;
-  }
-  if (!viewDirty) return;
-  viewDirty = false;
-  octx.drawImage(shot.canvas, 0, 0);
-  const P = (p) => [(p[0] - shot.vw / 2) * shot.s + cw / 2, (p[1] - shot.vh / 2) * shot.s + ch / 2];
-  if (state.area === 'center') drawScanArea(scanRect(shot.vw, shot.vh, true), P, dpr);
+  if (!vw) return;
+  const s = paintVideo(octx, video, vw, vh, cw, ch);
+  const P = (p) => [(p[0] - vw / 2) * s + cw / 2, (p[1] - vh / 2) * s + ch / 2];
+  if (state.area === 'center') drawScanArea(scanRect(vw, vh, true), P, dpr);
   // All outlines first, then all labels, so a box can never cover another tag's number.
-  const shown = visibleTracks().filter((t) => t.disp).map((t) => ({ id: t.id, q: t.disp.map(P), a: trackAlpha(t) }));
+  const shown = visibleTracks().map((t) => ({ id: t.id, q: shifted(t).map(P), a: trackAlpha(t) }));
   for (const m of shown) drawBox(m.id, m.q, m.a, dpr);
   for (const m of shown) drawLabel(m.id, m.q, m.a, dpr);
 }
@@ -882,7 +882,6 @@ function resetReads() {
   state.tracks = [];
   state.entered.clear();
   lastSeenAt.clear();
-  viewDirty = true;
   state.seen.clear();
   seenDirty = true;
 }
