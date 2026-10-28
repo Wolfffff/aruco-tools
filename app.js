@@ -269,6 +269,7 @@ async function startCamera() {
   const btn = $('start');
   btn.disabled = true;
   btn.textContent = 'Starting camera…';
+  $('gate').classList.add('starting');
   let stream = null;
   try {
     stream = await openStream(lensId());
@@ -307,6 +308,7 @@ async function startCamera() {
     $('bottom').hidden = false;
     $('stat').hidden = !state.showStats;
     requestWakeLock();
+    showTapHint();
   } catch (e) {
     // Release the camera whatever went wrong; an unreleased stream keeps the camera light
     // on and can make the next attempt fail.
@@ -317,6 +319,7 @@ async function startCamera() {
     state.track = null;
     btn.disabled = false;
     btn.textContent = 'Open camera';
+    $('gate').classList.remove('starting');
     // If the camera was already showing (a lens or 4K switch), bring the start screen back
     // so the message and the button are visible.
     state.revealed = false;
@@ -912,7 +915,7 @@ function drawLabel(id, q, alpha, dpr) {
   const step = 2 * dpr;
   const fs = Math.max(12 * dpr, Math.min(20 * dpr, Math.round((sideLen(q) * 0.2) / step) * step));
   octx.globalAlpha = alpha;
-  octx.font = `800 ${fs}px Archivo, -apple-system, system-ui, sans-serif`;
+  octx.font = `700 ${fs}px -apple-system, system-ui, 'Segoe UI', Roboto, sans-serif`;
   const label = String(id);
   const tw = octx.measureText(label).width;
   const lx = centroid(q)[0];
@@ -1069,7 +1072,7 @@ function renderSettings() {
     if (state.track) restartCamera();
   });
   $('lensGroup').hidden = !state.lenses.length;
-  $('camNow').textContent = video.videoWidth ? `Now ${Math.max(video.videoWidth, video.videoHeight)}×${Math.min(video.videoWidth, video.videoHeight)}.` : '';
+  $('camNow').textContent = video.videoWidth ? `Camera ${Math.max(video.videoWidth, video.videoHeight)}×${Math.min(video.videoWidth, video.videoHeight)}` : '';
   options($('areaOpts'), AREA_OPTIONS, state.area, (v) => { state.area = v; store.set('area', v); });
   options($('correctOpts'), [[false, 'Off'], [true, 'On']], state.correct, (v) => {
     state.correct = v;
@@ -1122,7 +1125,16 @@ $('settingsDone').onclick = closeSettings;
 $('scrim').onclick = closeSettings;
 // Tap the picture to freeze it (to read IDs at leisure); tap again to resume. A pinch is
 // not a tap, so zooming never freezes.
+// The first time the camera opens on this phone, say how to pause.
+function showTapHint() {
+  if (store.get('tapHintSeen')) return;
+  store.set('tapHintSeen', '1');
+  $('tapHint').hidden = false;
+  setTimeout(() => ($('tapHint').hidden = true), 2500);
+}
+
 function setFrozen(frozen) {
+  $('tapHint').hidden = true;
   state.paused = frozen;
   $('frozen').hidden = !frozen;
   if (frozen) video.pause();
@@ -1202,13 +1214,9 @@ renderSettings();
 renderSeen();
 warmWorkers();
 
-// If this site already has camera permission, skip the start screen's tap.
-(async () => {
-  try {
-    const p = await navigator.permissions?.query({ name: 'camera' });
-    if (p?.state === 'granted') startCamera();
-  } catch {} // some browsers cannot query camera permission; the button still works
-})();
+// Open straight into the reader. The start screen is only a splash while the camera
+// starts; its buttons matter only if the camera can't start (access denied, no camera).
+startCamera();
 
 // Start screen: a real 4×4 marker that flips its cells from one ID to the next, the way
 // the reader sees them. One cell wave every two seconds while the start screen shows.
@@ -1225,15 +1233,14 @@ warmWorkers();
     return el;
   });
   $('mark').replaceChildren(quiet, ...cells);
-  const show = (bits, id) => {
+  const show = (bits) => {
     cells.forEach((el, i) => {
       const x = i % 6, y = (i / 6) | 0;
       const inner = x > 0 && x < 5 && y > 0 && y < 5;
       el.classList.toggle('w', inner && bits[(y - 1) * 4 + (x - 1)] === '1');
     });
-    $('markCaption').textContent = `4×4 · ID ${id}`;
   };
-  show('1011010100110010', 0); // DICT_4X4 ID 0, drawn before the dictionary loads
+  show('1011010100110010'); // DICT_4X4 ID 0, drawn before the dictionary loads
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const ids = [0, 7, 23, 42, 3, 17, 31, 12];
   let k = 0;
@@ -1242,7 +1249,7 @@ warmWorkers();
     const timer = setInterval(() => {
       if ($('gate').hidden) { clearInterval(timer); return; }
       k = (k + 1) % ids.length;
-      show(dict.codeList[ids[k]], ids[k]);
+      show(dict.codeList[ids[k]]);
     }, 2000);
   }, () => {});
 })();

@@ -1,7 +1,7 @@
 // Offline-first: the app is served from the phone immediately. A release bumps VERSION
 // here together with the ?v= numbers in the pages, and installing the new version
 // downloads every file below in one go, so a page and its scripts never mix releases.
-const VERSION = 22;
+const VERSION = 23;
 const CACHE = 'aruco-tools-v' + VERSION;
 const DICTIONARIES = [
   'aruco_4x4_1000', 'aruco_5x5_1000', 'aruco_6x6_1000', 'aruco_7x7_1000', 'aruco_default_opencv',
@@ -19,7 +19,6 @@ const FILES = [
   'vendor/cv.js',
   'vendor/aruco.js',
   ...DICTIONARIES,
-  'fonts/archivo-latin.woff2',
   'icon.svg',
   'manifest.webmanifest',
 ];

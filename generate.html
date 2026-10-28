@@ -3,24 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#ffffff">
+<meta name="theme-color" content="#000000">
 <title>Print Markers</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="preload" href="fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="ui.css?v=22">
+<link rel="stylesheet" href="ui.css?v=23">
 <style>
-  /* Sheet generator. Shared tokens and components live in ui.css. The controls are paper;
-     the sheets sit on a light grey desk so their edges read. */
+  /* Sheet generator. Shared tokens and components live in ui.css. The sheets are white
+     paper (that is what gets printed) on the dark page. */
   html, body { overflow-x: hidden; }
-  body { --desk: #e8e8e8; background: var(--desk); }
   .controls {
-    position: sticky; top: 0; z-index: 2; background: var(--paper); border-bottom: 2px solid var(--ink);
+    position: sticky; top: 0; z-index: 2; background: var(--raised); border-bottom: 1px solid var(--line);
     padding: calc(env(safe-area-inset-top, 0px) + 14px) var(--sr) 14px var(--sl);
     display: flex; flex-wrap: wrap; gap: 12px; align-items: end;
   }
-  .controls h1 { flex: 1 0 100%; margin: 0; display: flex; align-items: center; gap: 12px; font: 850 28px/1 var(--font); font-stretch: 125%; letter-spacing: -0.01em; }
+  .controls h1 { flex: 1 0 100%; display: flex; align-items: center; gap: 12px; font: 700 22px/1.2 var(--font); }
   .controls h1 a { margin-left: auto; }
-  label { display: grid; gap: 6px; font: 650 14px var(--font); min-width: 0; }
+  label { display: grid; gap: 6px; font: 500 13px var(--font); color: var(--muted); min-width: 0; }
   input[type=number] { width: 88px; }
   input.ids { width: 160px; }
   .note { flex: 1 0 100%; margin: 0; font-size: 14px; }
@@ -29,19 +27,19 @@
   .fold { display: none; }
   @media (max-width: 600px) {
     .fold { display: flex; align-items: center; gap: 10px; flex: 1 0 100%; }
-    .fold span { flex: 1; min-width: 0; font: 650 15px var(--font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fold span { flex: 1; min-width: 0; font: 500 15px var(--font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .controls.folded > :not(h1):not(.fold):not(.print):not(.warn) { display: none !important; }
     .controls { position: static; }
   }
-  .summary { margin: 0; padding: 14px var(--sr) 0 var(--sl); color: var(--graphite); font: 600 14px var(--font); font-variant-numeric: tabular-nums; }
+  .summary { margin: 0; padding: 14px var(--sr) 0 var(--sl); color: var(--muted); font: 500 14px var(--font); font-variant-numeric: tabular-nums; }
 
   /* Pages are laid out at true size in mm; on screen each sits in a wrapper scaled to fit the width. */
   .pages { display: grid; justify-items: center; gap: 16px; padding: 12px var(--sr) 40px var(--sl); }
-  .pagewrap { width: calc(var(--pw) * var(--s, 1)); height: calc(var(--ph) * var(--s, 1)); box-shadow: 0 1px 3px rgba(0,0,0,0.18), 0 8px 24px rgba(0,0,0,0.08); }
+  .pagewrap { width: calc(var(--pw) * var(--s, 1)); height: calc(var(--ph) * var(--s, 1)); }
   .page { position: relative; overflow: hidden; width: var(--pw); height: var(--ph); background: #fff; color: #000; transform: scale(var(--s, 1)); transform-origin: 0 0; }
   .slot { position: absolute; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1mm; }
   .slot svg { display: block; flex: none; shape-rendering: crispEdges; }
-  .cap { font: 650 2.6mm/3mm var(--font); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .cap { font: 500 2.6mm/3mm var(--font); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .cut { position: absolute; border: 0 dashed #bbb; }
   .cut.v { width: 0; border-left-width: 0.2mm; }
   .cut.h { height: 0; border-top-width: 0.2mm; }
@@ -76,7 +74,7 @@
   <label>Labels <select id="labels"><option value="1">On</option><option value="0">Off</option></select></label>
   <label>Cut lines <select id="cuts"><option value="1">On</option><option value="0">Off</option></select></label>
   <button class="btn ink print" id="print">Print</button>
-  <p class="note" id="hint">Print at 100%, then check the 10 mm bar with a ruler.</p>
+  <p class="note" id="hint">Print at 100%.</p>
   <p class="note warn" id="warn" hidden></p>
 </div>
 <p class="summary" id="summary"></p>
@@ -84,7 +82,7 @@
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="markers.js?v=22"></script>
+<script src="markers.js?v=23"></script>
 <script>
 const SETS = MARKER_SETS.map((s) => ({ label: s.name, base: s.base, count: s.count }));
 const PAPERS = { a4: { name: 'A4', w: 210, h: 297 }, letter: { name: 'letter', w: 215.9, h: 279.4 } };

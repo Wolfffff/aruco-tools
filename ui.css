@@ -1,97 +1,76 @@
-/* ArUco Tools: shared design tokens and components.
-   The look follows the thing it reads: printed markers. Black ink on white paper, the
-   same two values a marker uses. Selection is shown by inversion, like a marker cell
-   flipping. The only colour is each tag's own outline hue. One typeface, Archivo:
-   expanded widths for headings, normal width for text. */
-
-@font-face {
-  font-family: 'Archivo';
-  src: url('fonts/archivo-latin.woff2') format('woff2');
-  font-weight: 100 900;
-  font-stretch: 62% 125%;
-  font-style: normal;
-  font-display: swap;
-}
+/* ArUco Tools: shared tokens and components. Dark, plain system type, minimal chrome.
+   Selection is shown by inversion (white on black flips to black on white). Markers are
+   always drawn in real black and white, whatever the theme. */
 
 :root {
-  --ink: #000;
-  --paper: #fff;
-  --graphite: #555; /* secondary text on paper, 7.5:1 */
-  --alert: #c4001a;
+  --bg: #000;
+  --raised: #1c1c1e;   /* sheets and strips over the camera */
+  --fg: #fff;
+  --muted: #9a9a9f;    /* secondary text, 7:1 on black */
+  --line: #3a3a3c;     /* borders of unselected controls */
+  --alert: #ff6b6b;
   --glass: rgba(0, 0, 0, 0.5);
-  --r-s: 6px;
+  --r-s: 8px;
   --r-m: 14px;
-  --font: 'Archivo', -apple-system, system-ui, 'Roboto', 'Helvetica Neue', sans-serif;
+  --font: -apple-system, system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
   --sl: max(16px, env(safe-area-inset-left, 0px));
   --sr: max(16px, env(safe-area-inset-right, 0px));
-  color-scheme: light;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--paper); color: var(--ink); font: 400 16px/1.45 var(--font); -webkit-tap-highlight-color: transparent; }
-:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 400 16px/1.4 var(--font); -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
 
-h1, h2, h3 { text-wrap: balance; }
-h2 { font: 800 24px/1.1 var(--font); font-stretch: 118%; letter-spacing: -0.01em; }
-h3 { font: 700 16px/1.25 var(--font); }
-p { color: var(--graphite); font-size: 15px; line-height: 1.45; }
+h1, h2, h3 { margin: 0; text-wrap: balance; }
+h2 { font: 700 22px/1.2 var(--font); }
+h3 { font: 600 15px/1.3 var(--font); color: var(--muted); }
+p { margin: 0; color: var(--muted); font-size: 14px; }
 a { color: inherit; }
 
-/* Buttons: ink (primary), line (secondary), text (inline). */
+/* Buttons: primary (white), line (outlined), text (inline). */
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-  height: 54px; padding: 0 20px; border: 2px solid var(--ink); border-radius: var(--r-s);
-  font: 700 17px var(--font); text-decoration: none; cursor: pointer;
-  background: var(--paper); color: var(--ink);
+  height: 50px; padding: 0 18px; border: 1.5px solid var(--line); border-radius: var(--r-s);
+  font: 600 16px var(--font); text-decoration: none; cursor: pointer;
+  background: transparent; color: var(--fg);
   transition: transform 80ms ease-out;
 }
 .btn:active { transform: scale(0.97); }
-.btn.ink { background: var(--ink); color: var(--paper); }
-.btn.line:active { background: var(--ink); color: var(--paper); }
-.btn.small { height: 42px; padding: 0 14px; font-size: 15px; }
-.btn.text { border-color: transparent; height: 40px; padding: 0 10px; font-weight: 650; font-size: 15px; background: transparent; }
-.btn.text:active { background: var(--ink); color: var(--paper); }
+.btn.ink { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.btn.line:active { background: var(--fg); color: var(--bg); }
+.btn.small { height: 38px; padding: 0 14px; font-size: 15px; }
+.btn.text { border-color: transparent; height: 38px; padding: 0 10px; font-size: 15px; }
+.btn.text:active { background: var(--fg); color: var(--bg); }
 .btn:disabled { opacity: 0.45; cursor: default; }
 
 /* Choices: cells that invert when chosen. */
 .opts { display: flex; flex-wrap: wrap; gap: 8px; }
 .opts button {
-  height: 42px; padding: 0 14px; border: 2px solid var(--ink); border-radius: var(--r-s);
-  background: var(--paper); color: var(--ink); font: 600 15px var(--font); cursor: pointer;
+  height: 38px; padding: 0 14px; border: 1.5px solid var(--line); border-radius: var(--r-s);
+  background: transparent; color: var(--fg); font: 500 15px var(--font); cursor: pointer;
   font-variant-numeric: tabular-nums; transition: transform 80ms ease-out;
 }
 .opts button:active { transform: scale(0.97); }
-.opts button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.opts button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
 
 select, input {
-  height: 48px; padding: 0 12px; border: 2px solid var(--ink); border-radius: var(--r-s);
-  background: var(--paper); color: var(--ink); font: 600 16px var(--font); max-width: 100%;
+  height: 44px; padding: 0 12px; border: 1.5px solid var(--line); border-radius: var(--r-s);
+  background: var(--raised); color: var(--fg); font: 500 16px var(--font); max-width: 100%;
 }
 select { padding-right: 32px; appearance: none; -webkit-appearance: none;
-  background: var(--paper) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%23000' stroke-width='2'/%3E%3C/svg%3E") no-repeat right 12px center / 12px; }
+  background: var(--raised) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%23fff' stroke-width='1.6'/%3E%3C/svg%3E") no-repeat right 12px center / 12px; }
 input[type=number] { font-variant-numeric: tabular-nums; }
 
-/* Printer's crop marks at the four corners of whatever sits inside. */
-.crop {
-  padding: 16px;
-  --m: linear-gradient(var(--ink), var(--ink));
-  background:
-    var(--m) top left / 16px 2px no-repeat, var(--m) top left / 2px 16px no-repeat,
-    var(--m) top right / 16px 2px no-repeat, var(--m) top right / 2px 16px no-repeat,
-    var(--m) bottom left / 16px 2px no-repeat, var(--m) bottom left / 2px 16px no-repeat,
-    var(--m) bottom right / 16px 2px no-repeat, var(--m) bottom right / 2px 16px no-repeat;
-}
-
-/* A marker drawn as SVG cells (border included) in a one-cell white quiet zone;
-   crisp edges, so neighbouring cells never show seams. */
-/* Generated marker images (cards, the shown marker, printed sheets): no seams either. */
+/* Generated marker images (cards, the shown marker, printed sheets): crisp, no seams. */
 .crisp svg, svg.crisp { shape-rendering: crispEdges; }
 
-.mark { display: block; width: min(54vw, 232px); height: auto; shape-rendering: crispEdges; }
-.mark rect { fill: var(--ink); transition: fill 180ms ease-in-out; transition-delay: var(--d, 0ms); }
-.mark rect.w, .mark .quiet { fill: var(--paper); }
+/* A marker drawn as SVG cells in a one-cell white quiet zone; always real black and white. */
+.mark { display: block; width: min(46vw, 200px); height: auto; shape-rendering: crispEdges; }
+.mark rect { fill: #000; transition: fill 180ms ease-in-out; transition-delay: var(--d, 0ms); }
+.mark rect.w, .mark .quiet { fill: #fff; }
 
 @keyframes sheet-in { from { transform: translateY(40px); opacity: 0.4; } }
 @keyframes fade-in { from { opacity: 0; } }

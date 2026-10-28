@@ -39,6 +39,4 @@ Print-ready sheets laid out in millimetres: pick a set, paper (A4 or Letter, por
 
 ## Credits
 
-Type: [Archivo](https://github.com/Omnibus-Type/Archivo) (SIL Open Font License, `fonts/OFL.txt`), stored with the app so it works offline.
-
 Detection core: [js-aruco2](https://github.com/damianofalcioni/js-aruco2) 2.0.0 (MIT), dictionaries from OpenCV (BSD). See `vendor/LICENSE-js-aruco2.txt`.
