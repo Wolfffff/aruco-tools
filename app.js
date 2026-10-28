@@ -60,6 +60,11 @@ const state = {
   size: +(store.get('size') || 50),
   res: SPEED_OPTIONS.some(([v]) => String(v) === store.get('speed')) ? +store.get('speed') : 960,
   cam: store.get('cam') === '4k' ? '4k' : '1080',
+  // 'auto' = the plain wide back lens when the phone names it (see pickSteadyLens), else a deviceId.
+  lens: store.get('lens') || 'auto',
+  lenses: [], // back cameras: { id, label }
+  revealed: false,
+  events: [], // recent camera/screen changes, shown in the speed readout
   area: AREA_OPTIONS.some(([v]) => v === store.get('area')) ? store.get('area') : 'auto',
   correct: store.get('correct') === '1',
   showStats: store.get('stats') === '1',
@@ -100,15 +105,14 @@ async function startCamera() {
   btn.disabled = true;
   btn.textContent = 'Starting camera…';
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: { ideal: 'environment' },
-        width: { ideal: CAMERA_SIZES[state.cam][0] },
-        height: { ideal: CAMERA_SIZES[state.cam][1] },
-        frameRate: { ideal: 30 },
-      },
-    });
+    let stream = await openStream(lensId());
+    // iPhones hand Safari a combined camera that hops between lenses as it focuses, which
+    // shows as a sudden zoom. Switch to the plain wide lens (behind the start screen).
+    const steady = state.lens === 'auto' ? await pickSteadyLens(stream) : null;
+    if (steady) {
+      stream.getTracks().forEach((t) => t.stop());
+      stream = await openStream(steady);
+    }
     video.srcObject = stream;
     state.track = stream.getVideoTracks()[0];
     setupTrackControls();
@@ -126,6 +130,8 @@ async function startCamera() {
     // snapshot pipeline (a raw video frame can be cropped slightly differently on iOS).
     startLoops();
     await firstShown();
+    state.revealed = true;
+    logEvent(`shown · ${video.videoWidth}×${video.videoHeight} · ${state.track.label || 'camera'}`);
     $('gate').hidden = true;
     $('top').hidden = false;
     $('bottom').hidden = false;
@@ -138,6 +144,57 @@ async function startCamera() {
       ? 'Camera access was denied. Allow it for this site in your browser settings and reload.'
       : 'Could not open the camera: ' + (e.message || e.name));
   }
+}
+
+const lensId = () => (state.lens !== 'auto' ? state.lens : store.get('steadyLens'));
+
+async function openStream(deviceId) {
+  const video = {
+    width: { ideal: CAMERA_SIZES[state.cam][0] },
+    height: { ideal: CAMERA_SIZES[state.cam][1] },
+    frameRate: { ideal: 30 },
+  };
+  if (deviceId) video.deviceId = { exact: deviceId };
+  else video.facingMode = { ideal: 'environment' };
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: false, video });
+  } catch (e) {
+    if (!deviceId || e.name === 'NotAllowedError') throw e;
+    // A remembered lens can disappear (another phone, OS update): fall back to any back camera.
+    store.set('steadyLens', '');
+    if (state.lens !== 'auto') { state.lens = 'auto'; store.set('lens', 'auto'); }
+    return openStream(null);
+  }
+}
+
+// Back cameras, by label. Labels only exist once camera permission is granted.
+async function listBackLenses() {
+  const all = (await navigator.mediaDevices.enumerateDevices?.()) || [];
+  const back = /back|rear|environment|rück|arrière|trasera|posteriore|traseira|背|후면/i;
+  state.lenses = all.filter((d) => d.kind === 'videoinput' && back.test(d.label)).map((d) => ({ id: d.deviceId, label: d.label }));
+  return state.lenses;
+}
+
+// The single wide lens ("Back Camera"), as opposed to the combined dual/triple camera or
+// the ultra-wide and telephoto lenses. Returns its id if switching to it is needed.
+async function pickSteadyLens(stream) {
+  try {
+    const lenses = await listBackLenses();
+    const multi = /dual|triple|ultra|wide|tele|macro|weit|grand|gran|tele|广角|長焦|望远/i;
+    const plain = lenses.find((l) => !multi.test(l.label));
+    if (!plain) return null;
+    store.set('steadyLens', plain.id);
+    const current = stream.getVideoTracks()[0]?.getSettings?.().deviceId;
+    return current === plain.id ? null : plain.id;
+  } catch {
+    return null;
+  }
+}
+
+const t0Page = performance.now();
+function logEvent(text) {
+  state.events.push(`${((performance.now() - t0Page) / 1000).toFixed(2)}s ${text}`);
+  if (state.events.length > 4) state.events.shift();
 }
 
 // iOS in particular may answer a 1080p or 4K request with a smaller stream, depending on
@@ -506,15 +563,23 @@ function draw() {
   // tags and frames from the old shape rather than drawing them in the wrong place.
   const size = video.videoWidth + 'x' + video.videoHeight;
   if (size !== lastVideoSize) {
-    if (lastVideoSize) { state.tracks = []; releaseShot(state.shown); state.shown = null; }
+    if (lastVideoSize) { state.tracks = []; if (state.revealed && video.videoWidth) logEvent(`camera size ${size}`); }
     lastVideoSize = size;
   }
-  if (overlay.width !== cw || overlay.height !== ch) { overlay.width = cw; overlay.height = ch; viewDirty = true; }
+  if (overlay.width !== cw || overlay.height !== ch) {
+    if (state.revealed) logEvent(`screen size ${cw}×${ch}`);
+    overlay.width = cw; overlay.height = ch; viewDirty = true;
+  }
   const vw = video.videoWidth, vh = video.videoHeight;
   const shot = state.shown;
-  if (state.switching && shot) { octx.drawImage(shot.canvas, 0, 0); return; }
-  // Until the first analyzed frame arrives, show the live camera.
-  if (!shot || shot.canvas.width !== cw || shot.canvas.height !== ch) {
+  if (shot && (state.switching || shot.canvas.width !== cw || shot.canvas.height !== ch)) {
+    // Never fall back to the raw video once the camera is showing (a second source can be
+    // cropped differently); stretch the last analyzed frame until the next one is ready.
+    octx.drawImage(shot.canvas, 0, 0, cw, ch);
+    return;
+  }
+  // Before the first analyzed frame (behind the start screen), show the live camera.
+  if (!shot) {
     octx.fillStyle = '#000';
     octx.fillRect(0, 0, cw, ch);
     if (vw && video.readyState >= 2) paintVideo(octx, video, vw, vh, cw, ch);
@@ -644,7 +709,7 @@ function renderReadouts() {
   }
   if (state.showStats && now - statAt > 250) {
     statAt = now;
-    $('stat').textContent = `${state.detTimes.length} reads/s · ${state.lastMs.toFixed(1)} ms · camera ${video.videoWidth}×${video.videoHeight} · scan ${state.scanW || 0}×${state.scanH || 0} · ${workers.length} worker${workers.length > 1 ? 's' : ''}${bitmapPath ? '' : ' (no bitmaps)'}`;
+    $('stat').textContent = `build ${BUILD.replace('?v=', '')} · ${state.detTimes.length} reads/s · ${state.lastMs.toFixed(1)} ms · camera ${video.videoWidth}×${video.videoHeight} · scan ${state.scanW || 0}×${state.scanH || 0} · ${workers.length} worker${workers.length > 1 ? 's' : ''}${bitmapPath ? '' : ' (no bitmaps)'}` + (state.events.length ? '\n' + state.events.join('\n') : '');
   }
   $('live').classList.toggle('live', !state.paused && state.detTimes.length > 0 && now - state.detTimes[state.detTimes.length - 1] < 500);
 }
@@ -719,6 +784,14 @@ function renderSettings() {
     store.set('cam', v);
     if (state.track) restartCamera();
   });
+  const short = (l) => l.replace(/^back\s*/i, '').replace(/\s*camera$/i, '') || 'Wide';
+  options($('lensOpts'), [['auto', 'Auto (steady)'], ...state.lenses.map((l) => [l.id, short(l.label)])], state.lens, (v) => {
+    if (v === state.lens) return;
+    state.lens = v;
+    store.set('lens', v);
+    if (state.track) restartCamera();
+  });
+  $('lensGroup').hidden = !state.lenses.length;
   $('camNow').textContent = video.videoWidth ? `Streaming ${Math.max(video.videoWidth, video.videoHeight)}×${Math.min(video.videoWidth, video.videoHeight)}.` : '';
   options($('areaOpts'), AREA_OPTIONS, state.area, (v) => { state.area = v; store.set('area', v); });
   options($('correctOpts'), [[false, 'Off'], [true, 'On']], state.correct, (v) => {
@@ -730,6 +803,7 @@ function renderSettings() {
     store.set('stats', v ? '1' : '0');
     $('stat').hidden = !v || $('top').hidden;
   });
+  $('build').textContent = `Build ${BUILD.replace('?v=', '')}`;
   $('setName').textContent = state.family.label + (state.family.sizes ? ` · ${state.size} IDs` : '');
 }
 
@@ -748,6 +822,7 @@ function resetReads() {
 }
 
 function openSettings() {
+  if (state.track && !state.lenses.length) listBackLenses().then(renderSettings, () => {});
   renderSettings();
   $('scrim').hidden = false;
   $('settings').hidden = false;
@@ -878,5 +953,13 @@ $('mark').innerHTML = Array.from({ length: 36 }, (_, i) => {
 }).join('');
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  // An update was installed in the background: load it right away if the camera is not
+  // showing yet, otherwise the next time the app goes to the background.
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) return; // first install, not an update
+    if (!state.revealed) location.reload();
+    else document.addEventListener('visibilitychange', () => { if (document.hidden) location.reload(); });
+  });
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }

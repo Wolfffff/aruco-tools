@@ -46,7 +46,9 @@
   :focus-visible { outline: 2px solid var(--on); outline-offset: 2px; }
   svg.i { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-  #stage { position: fixed; inset: 0; }
+  /* The camera area uses the largest viewport height, so Safari's toolbar collapsing or
+     expanding never resizes (and visibly rescales) the picture. */
+  #stage { position: fixed; top: 0; left: 0; right: 0; height: 100%; height: 100lvh; }
   /* The camera is painted into the opaque #overlay together with the outlines. The video
      element stays full size underneath (browsers keep delivering frames for on-screen
      video) but is never seen, so Safari's own video layout can't flash a small picture. */
@@ -71,7 +73,7 @@
   .top .spacer { flex: 1; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
   .dot.live { background: #30d158; }
-  .stat { position: fixed; z-index: 2; left: var(--sl); top: calc(env(safe-area-inset-top, 0px) + 58px); font: 11px var(--mono); color: rgba(255,255,255,0.8); text-shadow: 0 1px 2px #000; font-variant-numeric: tabular-nums; pointer-events: none; }
+  .stat { white-space: pre-line; position: fixed; z-index: 2; left: var(--sl); top: calc(env(safe-area-inset-top, 0px) + 58px); font: 11px var(--mono); color: rgba(255,255,255,0.8); text-shadow: 0 1px 2px #000; font-variant-numeric: tabular-nums; pointer-events: none; }
 
   /* bottom */
   .bottom {
@@ -127,6 +129,7 @@
     background: rgba(255,255,255,0.05); font: 600 14px var(--sans);
   }
   .opts button[aria-pressed="true"] { background: var(--fg); color: #000; border-color: var(--fg); }
+  .build { margin: 0; font: 11px var(--mono); color: var(--dim); }
   .dictname { margin: -10px 0 0; font: 12px var(--mono); color: var(--dim); }
   .more { display: grid; gap: 18px; }
   .more summary { cursor: pointer; font-weight: 600; color: var(--dim); list-style: none; display: flex; align-items: center; gap: 6px; }
@@ -222,6 +225,7 @@
     <div class="group">
       <h3>Camera</h3>
       <div class="opts" id="camOpts"></div>
+      <div class="opts" id="lensGroup" hidden><div class="opts" id="lensOpts"></div></div>
       <p>4K gives the larger scan sizes real detail to work with, so tags read from farther away. The phone runs warmer. <span id="camNow"></span></p>
     </div>
     <div class="group">
@@ -243,6 +247,7 @@
     <button id="showMarker">Show a marker</button>
     <a href="generate.html">Print marker sheets</a>
   </div>
+  <p class="build" id="build"></p>
 </div>
 
 <div class="gate" id="gate">
@@ -270,6 +275,6 @@
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="app.js?v=13"></script>
+<script src="app.js?v=14"></script>
 </body>
 </html>
