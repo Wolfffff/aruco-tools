@@ -661,14 +661,18 @@ function drawMarker(id, q, alpha, dpr) {
   octx.stroke();
   octx.shadowBlur = 0;
 
-  // ID label sitting just above the tag's highest corner.
-  const fs = Math.max(12 * dpr, Math.min(20 * dpr, side * 0.2));
+  // ID label centred above the tag. Anchored to the tag's centre and top edge, which move
+  // smoothly as it turns (a corner-anchored label jumps whenever another corner becomes
+  // the highest). Size steps in 2 px increments so it does not jitter with the tag.
+  const step = 2 * dpr;
+  const fs = Math.max(12 * dpr, Math.min(20 * dpr, Math.round((side * 0.2) / step) * step));
   octx.font = `700 ${fs}px -apple-system, system-ui, Roboto, sans-serif`;
   const label = String(id);
   const tw = octx.measureText(label).width;
-  const topPt = q.reduce((a, p) => (p[1] < a[1] ? p : a));
+  const lx = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4;
+  const top = Math.min(q[0][1], q[1][1], q[2][1], q[3][1]);
   const h = fs * 1.5, w = Math.max(h, tw + fs * 0.9);
-  const lx = topPt[0], ly = Math.max(h / 2 + 2 * dpr, topPt[1] - h / 2 - 5 * dpr);
+  const ly = Math.max(h / 2 + 2 * dpr, top - h / 2 - 6 * dpr);
   octx.fillStyle = color(id);
   roundRect(lx - w / 2, ly - h / 2, w, h, h / 2);
   octx.fill();
@@ -694,7 +698,7 @@ function roundRect(x, y, w, h, r) {
 let statAt = 0;
 let seenAt = 0;
 let inViewKey = '';
-let lastInView = new Set();
+const lastSeenAt = new Map(); // id -> when it was last in view
 
 // Tiny drawings of tags for the list, from the same dictionary the detector uses.
 const miniCache = new Map(); // `${setKey}:${id}` -> svg markup
@@ -720,13 +724,18 @@ function miniSvg(id) {
 function renderReadouts() {
   const now = performance.now();
   const inView = new Set(visibleTracks().map((t) => t.id));
-  const key = [...inView].sort((a, b) => a - b).join(',');
-  // A tag moves to the front when it comes into view, and stays put while it is in view.
-  for (const id of inView) if (!lastInView.has(id)) state.entered.set(id, now);
-  lastInView = inView;
-  if (seenDirty || key !== inViewKey || (inView.size && now - seenAt > 400)) {
-    inViewKey = key;
-    renderSeen(inView);
+  // A tag moves to the front only when it comes back after being gone for over a second;
+  // brief dropouts (blur, a hand passing) don't reshuffle the list.
+  for (const id of inView) {
+    if (now - (lastSeenAt.get(id) ?? -Infinity) > 1000) state.entered.set(id, now);
+    lastSeenAt.set(id, now);
+  }
+  // The in-view ring also ignores dropouts shorter than ~0.35 s.
+  const ringed = new Set([...lastSeenAt].filter(([, t]) => now - t < 350).map(([id]) => id));
+  const ringKey = [...ringed].sort((a, b) => a - b).join(',');
+  if (seenDirty || ringKey !== inViewKey || (inView.size && now - seenAt > 400)) {
+    inViewKey = ringKey;
+    renderSeen(ringed);
   }
   if (state.showStats && now - statAt > 250) {
     statAt = now;
@@ -837,6 +846,7 @@ function resetReads() {
   warmWorkers();
   state.tracks = [];
   state.entered.clear();
+  lastSeenAt.clear();
   viewDirty = true;
   state.seen.clear();
   seenDirty = true;
