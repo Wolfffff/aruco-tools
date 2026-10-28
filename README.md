@@ -12,7 +12,8 @@ Phone-first ArUco / AprilTag tools. Static site, no build step, nothing leaves t
 - Auto range: alternates full-frame and 2× center passes so near and far tags both read
 - Strict decoding: solid black border, minimum contrast, no ambiguous cells, exact code match; a tag must be read twice in a row before it is shown
 - Optional error correction, sized to each set's real minimum distance (rotations included)
-- Fast by default (960 px detection); Max detail uses the full 1080p camera stream
+- Fast by default (960 px per pass); Max detail uses 1920 px per pass
+- Optional 4K camera stream (Settings → More → Camera): same cost per pass, the center pass reads native pixels for roughly double the range
 - Tolerates a few blurred cells while still requiring an exact code match
 - Adaptive thresholding that cycles settings when nothing is found (dim light, big tags)
 - Torch and zoom where the phone exposes them; works offline after first load; add to home screen for full screen

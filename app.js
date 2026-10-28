@@ -32,8 +32,11 @@ const DICT_FILES = {
   APRILTAG_25h9: 'apriltag_25h9',
   APRILTAG_16h5: 'apriltag_16h5',
 };
-// Longest side of the frame handed to the detector; 0 = the camera's native size (1080p).
-const SPEED_OPTIONS = [[960, 'Fast'], [0, 'Max detail']];
+// Pixel budget per detection pass: the longest side of the frame handed to the detector.
+// The 2x center pass gets the same budget, so with a 4K camera it reads native pixels.
+const SPEED_OPTIONS = [[960, 'Fast'], [1920, 'Max detail']];
+const CAMERA_OPTIONS = [['1080', '1080p'], ['4k', '4K']];
+const CAMERA_SIZES = { '1080': [1920, 1080], '4k': [3840, 2160] };
 const AREA_OPTIONS = [['auto', 'Auto'], ['full', 'Whole frame'], ['center', 'Far only (2×)']];
 
 // A tag is shown only after it is read twice in a row at the same place,
@@ -52,7 +55,8 @@ const store = {
 const state = {
   family: FAMILIES.find((f) => f.key === store.get('family')) || FAMILIES[0],
   size: +(store.get('size') || 50),
-  res: SPEED_OPTIONS.some(([v]) => String(v) === store.get('speed')) ? +store.get('speed') : 960,
+  res: store.get('speed') === '1920' || store.get('speed') === '0' ? 1920 : 960,
+  cam: store.get('cam') === '4k' ? '4k' : '1080',
   area: AREA_OPTIONS.some(([v]) => v === store.get('area')) ? store.get('area') : 'auto',
   correct: store.get('correct') === '1',
   showStats: store.get('stats') === '1',
@@ -89,13 +93,14 @@ async function startCamera() {
       audio: false,
       video: {
         facingMode: { ideal: 'environment' },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
+        width: { ideal: CAMERA_SIZES[state.cam][0] },
+        height: { ideal: CAMERA_SIZES[state.cam][1] },
         frameRate: { ideal: 30 },
       },
     });
     video.srcObject = stream;
     await video.play();
+    if (!$('settings').hidden) renderSettings(); // shows the new stream size after a switch
     state.track = stream.getVideoTracks()[0];
     setupTrackControls();
     $('gate').hidden = true;
@@ -149,6 +154,7 @@ async function restartCamera() {
   state.track?.stop();
   state.track = null;
   state.busy = false;
+  state.tracks = []; // positions are in the old stream's pixels
   await startCamera();
 }
 
@@ -168,7 +174,7 @@ function sendFrame() {
   if (!vw || video.readyState < 2) return;
   state.flip = !state.flip;
   const center = state.area === 'center' || (state.area === 'auto' && state.flip);
-  const full = state.res ? Math.min(1, state.res / Math.max(vw, vh)) : 1;
+  const full = Math.min(1, state.res / Math.max(vw, vh));
   // The center pass upsamples 2x: same pixel budget as a whole-frame pass, double the reach.
   const scale = center ? Math.min(2, full * 2) : full;
   const r = scanRect(vw, vh, center);
@@ -469,6 +475,13 @@ function renderSettings() {
   });
   $('dictName').textContent = `OpenCV: ${setLabel()}`;
   options($('speedOpts'), SPEED_OPTIONS, state.res, (v) => { state.res = v; store.set('speed', String(v)); });
+  options($('camOpts'), CAMERA_OPTIONS, state.cam, (v) => {
+    if (v === state.cam) return;
+    state.cam = v;
+    store.set('cam', v);
+    if (state.track) restartCamera();
+  });
+  $('camNow').textContent = video.videoWidth ? `Streaming ${Math.max(video.videoWidth, video.videoHeight)}×${Math.min(video.videoWidth, video.videoHeight)}.` : '';
   options($('areaOpts'), AREA_OPTIONS, state.area, (v) => { state.area = v; store.set('area', v); });
   options($('correctOpts'), [[false, 'Off'], [true, 'On']], state.correct, (v) => {
     state.correct = v;
