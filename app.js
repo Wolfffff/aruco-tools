@@ -1,7 +1,10 @@
 const $ = (id) => document.getElementById(id);
+// The page loads this script as app.js?v=N; the worker gets the same N, so a phone never
+// mixes files from two releases (old cached page with new script, or the reverse).
+const BUILD = new URL(document.currentScript.src).search;
 const video = $('video');
 const overlay = $('overlay');
-const octx = overlay.getContext('2d');
+const octx = overlay.getContext('2d', { alpha: false });
 const grab = document.createElement('canvas');
 const gctx = grab.getContext('2d', { willReadFrequently: true });
 
@@ -39,13 +42,12 @@ const CAMERA_OPTIONS = [['1080', '1080p'], ['4k', '4K']];
 const CAMERA_SIZES = { '1080': [1920, 1080], '4k': [3840, 2160] };
 const AREA_OPTIONS = [['auto', 'Auto'], ['full', 'Whole frame'], ['center', 'Far only (2×)']];
 
-// A tag is shown only after it is read twice in a row at the same place,
-// which removes nearly all one-frame misreads of textures and text.
+// A tag is shown only after it is read twice at the same place, which removes nearly
+// all one-frame misreads of textures and text.
 const CONFIRM_HITS = 2;
-// How long a tag survives without a read. It scales with the measured time between
-// passes, so slow phones (or auto mode, where a tag may only be in every other pass)
-// do not drop tags between reads.
-const trackTimeout = () => Math.max(300, state.passGap * (state.area === 'auto' ? 5 : 2.5));
+// Tags are aged in detection passes, not milliseconds. In auto mode a tag may only be
+// visible to every other pass (whole frame vs center), so it gets one pass of grace.
+const passGrace = () => (state.area === 'auto' ? 1 : 0);
 
 const store = {
   get(k) { try { return localStorage.getItem(k); } catch { return null; } },
@@ -67,7 +69,10 @@ const state = {
   loopsStarted: false,
   track: null,
   zoom: null, // { hw, min, max, step, value }: hw = the camera's own zoom, else digital
-  tracks: [], // { id, corners, at, born, hits }
+  tracks: [], // { id, corners, pass, hits }
+  passNo: 0, // detection results received
+  shown: null, // the analyzed frame on screen: { canvas, s, vw, vh }
+  inflight: null, // the frame the worker is analyzing now
   seen: new Map(), // id -> frames read (confirmed only)
   detTimes: [],
   lastMs: 0,
@@ -92,7 +97,6 @@ async function startCamera() {
   const btn = $('start');
   btn.disabled = true;
   btn.textContent = 'Starting camera…';
-  video.classList.remove('ready');
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
@@ -110,7 +114,6 @@ async function startCamera() {
     // iOS can paint the first frames before the video knows its real size, which shows
     // as a small picture that then jumps to full screen. Reveal only a real frame.
     await firstFrame();
-    video.classList.add('ready');
     btn.disabled = false;
     btn.textContent = 'Open camera';
     if (!$('settings').hidden) renderSettings(); // shows the new stream size after a switch
@@ -160,7 +163,6 @@ function setupTrackControls() {
   state.zoom = hw
     ? { hw, min: caps.zoom.min, max: Math.min(caps.zoom.max, 10), step: caps.zoom.step || 0.1, value: state.track.getSettings?.().zoom || caps.zoom.min }
     : { hw, min: 1, max: 4, step: 0.01, value: 1 };
-  applyDigitalZoom();
 }
 
 /* ---------- zoom (pinch on the picture) ---------- */
@@ -169,18 +171,13 @@ function setupTrackControls() {
 // crops to the visible area, so the pixel budget goes to what you are looking at.
 const digitalZoom = () => (state.zoom && !state.zoom.hw ? state.zoom.value : 1);
 
-function applyDigitalZoom() {
-  const dz = digitalZoom();
-  video.style.transform = dz === 1 ? '' : `scale(${dz})`;
-}
-
 let zoomQueued = false;
 function setZoom(value) {
   const z = state.zoom;
   if (!z) return;
   z.value = Math.min(z.max, Math.max(z.min, Math.round(value / z.step) * z.step));
   showZoomHint();
-  if (!z.hw) return applyDigitalZoom();
+  if (!z.hw) return; // digital zoom is applied when painting and scanning
   // Coalesce to one camera update per frame; pinches fire far more often than that.
   if (zoomQueued) return;
   zoomQueued = true;
@@ -237,12 +234,13 @@ async function restartCamera() {
   state.track = null;
   state.busy = false;
   state.tracks = []; // positions are in the old stream's pixels
+  state.shown = state.inflight = null;
   await startCamera();
 }
 
 /* ---------- detection ---------- */
 
-const worker = new Worker('worker.js');
+const worker = new Worker('worker.js' + BUILD);
 
 // The part of the video frame being scanned, in video pixels.
 function scanRect(vw, vh, center) {
@@ -264,6 +262,7 @@ function sendFrame() {
   const w = Math.round(r.w * scale), h = Math.round(r.h * scale);
   if (grab.width !== w || grab.height !== h) { grab.width = w; grab.height = h; }
   gctx.drawImage(video, r.x, r.y, r.w, r.h, 0, 0, w, h);
+  state.inflight = takeShot(vw, vh); // the same camera frame, sized for the screen
   const img = gctx.getImageData(0, 0, w, h);
   state.busy = true;
   worker.postMessage(
@@ -274,42 +273,53 @@ function sendFrame() {
 
 worker.onmessage = (e) => {
   state.busy = false;
+  const { markers, ms, error } = e.data;
+  if (!state.paused) {
+    // Show the frame that was just analyzed, so outlines match the picture exactly.
+    if (state.inflight) { state.shown = state.inflight; state.inflight = null; viewDirty = true; }
+    if (error) console.error(error);
+    else onResult(markers, ms);
+  }
   // A camera frame arrived while we were busy: process it right away.
   if (state.pending) { state.pending = false; sendFrame(); }
-  const { markers, ms, error } = e.data;
-  if (error) { console.error(error); return; }
-  if (state.paused) return;
+};
+
+function onResult(markers, ms) {
   const now = performance.now();
-  for (const m of markers) addRead(m, now);
+  state.passNo++;
+  for (const m of markers) addRead(m);
+  state.tracks = state.tracks.filter((t) => state.passNo - t.pass <= passGrace() + 2);
   state.lastMs = ms;
   const dt = state.detTimes;
   if (dt.length) state.passGap = state.passGap * 0.8 + Math.min(1000, now - dt[dt.length - 1]) * 0.2;
   dt.push(now);
   while (dt.length && now - dt[0] > 1000) dt.shift();
-};
+}
+
+// Confirmed tags that belong on the frame now shown.
+const visibleTracks = () => state.tracks.filter((t) => t.hits >= CONFIRM_HITS && state.passNo - t.pass <= passGrace());
 
 const centroid = (c) => [(c[0][0] + c[1][0] + c[2][0] + c[3][0]) / 4, (c[0][1] + c[1][1] + c[2][1] + c[3][1]) / 4];
 const sideLen = (c) => Math.hypot(c[0][0] - c[2][0], c[0][1] - c[2][1]) / 1.414;
 
-function addRead(m, now) {
+function addRead(m) {
   const [cx, cy] = centroid(m.corners);
   const reach = Math.max(24, sideLen(m.corners));
   let best = null, bestD = Infinity;
   for (const t of state.tracks) {
-    if (t.id !== m.id || now - t.at > trackTimeout()) continue;
+    if (t.id !== m.id || t.pass === state.passNo) continue;
     const [tx, ty] = centroid(t.corners);
     const d = Math.hypot(tx - cx, ty - cy);
     if (d < reach && d < bestD) { best = t; bestD = d; }
   }
   if (best) {
-    // Light smoothing removes jitter without visible lag.
-    best.corners = best.corners.map((p, i) => [p[0] * 0.3 + m.corners[i][0] * 0.7, p[1] * 0.3 + m.corners[i][1] * 0.7]);
-    best.at = now;
+    // No smoothing: the corners belong to the frame on screen, so they are already exact.
+    best.corners = m.corners;
+    best.pass = state.passNo;
     best.hits++;
-    if (best.hits === CONFIRM_HITS) best.born = now;
     if (best.hits >= CONFIRM_HITS) markSeen(m.id);
   } else {
-    state.tracks.push({ id: m.id, corners: m.corners, at: now, born: now, hits: 1 });
+    state.tracks.push({ id: m.id, corners: m.corners, pass: state.passNo, hits: 1 });
   }
 }
 
@@ -331,51 +341,71 @@ function startLoops() {
   if (state.loopsStarted) return;
   state.loopsStarted = true;
   if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
-    const tick = () => { onVideoFrame(); video.requestVideoFrameCallback(tick); };
+    const tick = () => { video.requestVideoFrameCallback(tick); onVideoFrame(); };
     video.requestVideoFrameCallback(tick);
   } else {
     let lastTime = -1;
     const tick = () => {
-      if (video.currentTime !== lastTime) { lastTime = video.currentTime; onVideoFrame(); }
       requestAnimationFrame(tick);
+      if (video.currentTime !== lastTime) { lastTime = video.currentTime; onVideoFrame(); }
     };
     requestAnimationFrame(tick);
   }
+  // Each loop books its next run first, so one bad frame can never freeze the screen.
   const paint = () => {
+    requestAnimationFrame(paint);
     draw();
     renderReadouts();
-    requestAnimationFrame(paint);
   };
   requestAnimationFrame(paint);
 }
 
 /* ---------- drawing ---------- */
 
-function draw() {
-  const dpr = Math.min(devicePixelRatio || 1, 2); // 3x overlays cost fill-rate on big phones for no visible gain
-  const cw = Math.round(overlay.clientWidth * dpr), ch = Math.round(overlay.clientHeight * dpr);
-  if (overlay.width !== cw || overlay.height !== ch) { overlay.width = cw; overlay.height = ch; }
-  octx.clearRect(0, 0, cw, ch);
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw) return;
+// Two screen-sized buffers: one on screen, one receiving the frame being analyzed.
+const shots = [document.createElement('canvas'), document.createElement('canvas')];
+let viewDirty = true;
 
-  // Map video pixels to the screen the same way object-fit: cover does.
-  // (plus the digital zoom, which scales the video about its center).
+function screenSize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2); // 3x costs fill-rate on big phones for no visible gain
+  return { dpr, cw: Math.round(overlay.clientWidth * dpr), ch: Math.round(overlay.clientHeight * dpr) };
+}
+
+// Fill the screen with the camera, cropping the overflow (like object-fit: cover),
+// magnified about the center by any digital zoom.
+function paintVideo(ctx, vw, vh, cw, ch) {
   const s = Math.max(cw / vw, ch / vh) * digitalZoom();
-  const P = (p) => [(p[0] - vw / 2) * s + cw / 2, (p[1] - vh / 2) * s + ch / 2];
+  ctx.drawImage(video, cw / 2 - (vw * s) / 2, ch / 2 - (vh * s) / 2, vw * s, vh * s);
+  return s;
+}
 
-  if (state.area === 'center') drawScanArea(scanRect(vw, vh, true), P, dpr);
+function takeShot(vw, vh) {
+  const { cw, ch } = screenSize();
+  const canvas = shots[state.shown?.canvas === shots[0] ? 1 : 0];
+  if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const s = paintVideo(ctx, vw, vh, cw, ch);
+  return { canvas, s, vw, vh };
+}
 
-  const now = performance.now();
-  const timeout = trackTimeout();
-  state.tracks = state.tracks.filter((t) => state.paused || now - t.at <= timeout);
-  for (const t of state.tracks) {
-    if (t.hits < CONFIRM_HITS) continue;
-    const age = now - t.at;
-    const hold = timeout - 180; // stay solid until the last ~180 ms, then fade
-    const alpha = state.paused || age < hold ? 1 : 1 - (age - hold) / 180;
-    drawMarker(t.id, t.corners.map(P), alpha, dpr);
+function draw() {
+  const { dpr, cw, ch } = screenSize();
+  if (overlay.width !== cw || overlay.height !== ch) { overlay.width = cw; overlay.height = ch; viewDirty = true; }
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const shot = state.shown;
+  // Until the first analyzed frame arrives, show the live camera.
+  if (!shot || shot.canvas.width !== cw || shot.canvas.height !== ch) {
+    octx.fillStyle = '#000';
+    octx.fillRect(0, 0, cw, ch);
+    if (vw && video.readyState >= 2) paintVideo(octx, vw, vh, cw, ch);
+    return;
   }
+  if (!viewDirty) return;
+  viewDirty = false;
+  octx.drawImage(shot.canvas, 0, 0);
+  const P = (p) => [(p[0] - shot.vw / 2) * shot.s + cw / 2, (p[1] - shot.vh / 2) * shot.s + ch / 2];
+  if (state.area === 'center') drawScanArea(scanRect(shot.vw, shot.vh, true), P, dpr);
+  for (const t of visibleTracks()) drawMarker(t.id, t.corners.map(P), 1, dpr);
 }
 
 function drawScanArea(r, P, dpr) {
@@ -482,7 +512,7 @@ function miniSvg(id) {
 
 function renderReadouts() {
   const now = performance.now();
-  const inView = new Set(state.tracks.filter((t) => t.hits >= CONFIRM_HITS && now - t.at < trackTimeout() - 100).map((t) => t.id));
+  const inView = new Set(visibleTracks().map((t) => t.id));
   const key = [...inView].sort((a, b) => a - b).join(',');
   if (seenDirty || key !== inViewKey || (inView.size && now - seenAt > 400)) {
     inViewKey = key;
@@ -579,6 +609,7 @@ function renderSettings() {
 
 function resetReads() {
   state.tracks = [];
+  viewDirty = true;
   state.seen.clear();
   seenDirty = true;
 }

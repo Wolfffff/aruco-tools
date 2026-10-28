@@ -35,10 +35,11 @@
   svg.i { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
   #stage { position: fixed; inset: 0; }
-  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 0.18s ease-out; }
-  #video.ready { opacity: 1; }
-  @media (prefers-reduced-motion: reduce) { #video { transition: none; } }
-  #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  /* The camera is painted into the opaque #overlay together with the outlines. The video
+     element stays full size underneath (browsers keep delivering frames for on-screen
+     video) but is never seen, so Safari's own video layout can't flash a small picture. */
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; background: #000; }
 
   .glass { background: var(--glass); -webkit-backdrop-filter: blur(16px) saturate(1.4); backdrop-filter: blur(16px) saturate(1.4); }
 
@@ -257,6 +258,6 @@
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="app.js"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>
