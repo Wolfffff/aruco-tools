@@ -270,21 +270,26 @@ async function startCamera() {
   btn.disabled = true;
   btn.textContent = 'Starting camera…';
   $('gate').classList.add('starting');
+  // On a switch (lens, 4K, coming back from the background) the current stream keeps
+  // running until the new one is ready.
+  const previous = video.srcObject;
   let stream = null;
   try {
-    stream = await openStream(lensId());
+    stream = await openStream(lensId(), previous);
     check();
     // iPhones hand Safari a combined camera that hops between lenses as it focuses, which
-    // shows as a sudden zoom. Switch to the plain wide lens (behind the start screen).
+    // shows as a sudden zoom. Switch to the plain wide lens (behind the start screen),
+    // asking while the first stream still runs; if that fails, keep the first one.
     const steady = state.lens === 'auto' ? await pickSteadyLens(stream) : null;
     check();
     if (steady) {
-      stream.getTracks().forEach((t) => t.stop());
-      stream = await openStream(steady);
+      const next = await openStream(steady, stream).catch(() => null);
       check();
+      if (next && next !== stream) { stopStream(stream); stream = next; }
     }
     const track = stream.getVideoTracks()[0];
     video.srcObject = stream;
+    if (previous && previous !== stream) stopStream(previous);
     state.track = track;
     setupTrackControls();
     await video.play();
@@ -314,9 +319,10 @@ async function startCamera() {
   } catch (e) {
     // Release the camera whatever went wrong; an unreleased stream keeps the camera light
     // on and can make the next attempt fail.
-    if (stream && stream !== video.srcObject) stream.getTracks().forEach((t) => t.stop());
+    if (stream && stream !== video.srcObject) stopStream(stream);
     if (e === SUPERSEDED) return;
-    stream?.getTracks().forEach((t) => t.stop());
+    stopStream(stream);
+    stopStream(previous);
     video.srcObject = null;
     state.track = null;
     btn.disabled = false;
@@ -336,7 +342,13 @@ async function startCamera() {
 
 const lensId = () => (state.lens !== 'auto' ? state.lens : store.get('steadyLens'));
 
-async function openStream(deviceId) {
+const stopStream = (stream) => stream?.getTracks().forEach((t) => t.stop());
+
+// Opens the camera. `previous` is a stream still running (the one being replaced): it is
+// kept alive while asking, because once every camera stream has stopped, Safari may treat
+// the next request as new and ask for permission again. Phones that cannot run two camera
+// streams at once refuse; then the previous one is released and the request retried.
+async function openStream(deviceId, previous = null) {
   const video = {
     width: { ideal: CAMERA_SIZES[state.cam][0] },
     height: { ideal: CAMERA_SIZES[state.cam][1] },
@@ -347,11 +359,16 @@ async function openStream(deviceId) {
   try {
     return await navigator.mediaDevices.getUserMedia({ audio: false, video });
   } catch (e) {
-    if (!deviceId || e.name === 'NotAllowedError') throw e;
+    if (e.name === 'NotAllowedError') throw e;
+    if (previous && previous.active && (e.name === 'NotReadableError' || e.name === 'AbortError')) {
+      stopStream(previous);
+      return openStream(deviceId, null);
+    }
+    if (!deviceId) throw e;
     // A remembered lens can disappear (another phone, OS update): fall back to any back camera.
     store.set('steadyLens', '');
     if (state.lens !== 'auto') { state.lens = 'auto'; store.set('lens', 'auto'); }
-    return openStream(null);
+    return openStream(null, previous);
   }
 }
 
@@ -531,9 +548,8 @@ async function restartCamera() {
   // Hold the last frame on screen until the new stream has settled.
   state.switching = true;
   dropInFlight();
-  state.track?.stop();
-  state.track = null;
   state.tracks = []; // positions are in the old stream's pixels
+  // The current stream keeps running until startCamera has the new one (see openStream).
   const gen = cameraGen + 1; // the generation startCamera is about to take
   try {
     await startCamera();
@@ -1127,10 +1143,8 @@ $('settingsDone').onclick = closeSettings;
 $('scrim').onclick = closeSettings;
 // Tap the picture to freeze it (to read IDs at leisure); tap again to resume. A pinch is
 // not a tap, so zooming never freezes.
-// The first time the camera opens on this phone, say how to pause.
+// Each time the camera opens, say how to pause.
 function showTapHint() {
-  if (store.get('tapHintSeen')) return;
-  store.set('tapHintSeen', '1');
   $('tapHint').hidden = false;
   setTimeout(() => ($('tapHint').hidden = true), 2500);
 }
