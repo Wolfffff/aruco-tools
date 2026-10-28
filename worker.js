@@ -302,13 +302,19 @@ function findContours(minLen) {
 // motion blur) is looked for again in a small area around where it should be, trying
 // every threshold setting and allowing error correction. Only the same ID is accepted,
 // which is far safer than detecting from scratch, so this cannot add false reads.
+// Threshold settings worth trying on a blurred tag; the other two rarely add a read.
+const VERIFY_PASSES = [PASSES[0], PASSES[2]];
+const MAX_RECHECKS = 3; // per frame, so a crowd of departing tags cannot slow a frame down
+
 function verifyExpected(det, expect, found, w, h) {
   const out = [];
+  let rechecks = 0;
   for (const e of expect) {
     const xs = e.corners.map((c) => c[0]), ys = e.corners.map((c) => c[1]);
     const cx = (xs[0] + xs[1] + xs[2] + xs[3]) / 4, cy = (ys[0] + ys[1] + ys[2] + ys[3]) / 4;
     const size = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
     if (found.some((m) => m.id === e.id && Math.hypot(m.cx - cx, m.cy - cy) < size)) continue;
+    if (++rechecks > MAX_RECHECKS) break;
     const pad = Math.max(12, size * 0.45);
     const x0 = Math.max(0, Math.floor(Math.min(...xs) - pad)), y0 = Math.max(0, Math.floor(Math.min(...ys) - pad));
     const x1 = Math.min(w, Math.ceil(Math.max(...xs) + pad)), y1 = Math.min(h, Math.ceil(Math.max(...ys) + pad));
@@ -323,7 +329,7 @@ function verifyExpected(det, expect, found, w, h) {
     det.grey = new CV.Image(rw, rh, buf.gray);
     det.dictionary.tau = det.correctable + 1;
     let hit = null;
-    for (const p of PASSES) {
+    for (const p of VERIFY_PASSES) {
       adaptiveThreshold(p.kernel, p.thresh);
       let cands = det.findCandidates(findContours(8), 8, 0.05, 8);
       cands = det.clockwiseCorners(cands).filter(plausible);

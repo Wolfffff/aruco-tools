@@ -50,40 +50,24 @@ const CONFIRM_HITS = 2;
 // (usually motion blur) is held at its predicted position for up to two passes (~60 ms),
 // long enough to bridge a blurry frame, short enough not to linger. In auto mode a tag may
 // only be visible to every other pass (whole frame vs center), so it gets one more.
-const holdPasses = () => (state.area === 'auto' ? 5 : 4);
+// A confirmed tag a pass misses (usually motion blur) fades out over two passes (~60 ms)
+// instead of blinking off. In auto mode a tag may only be visible to every other pass
+// (whole frame vs center), so it gets one more.
+const holdPasses = () => (state.area === 'auto' ? 3 : 2);
 
-// One Euro filter (Casiez et al.): smooths hard when a value is nearly still (removes
-// jitter) and lightly when it moves fast (no visible lag). Units: camera pixels, seconds.
-class OneEuro {
-  constructor(minCutoff = 1.5, beta = 0.04, dCutoff = 1) {
-    this.minCutoff = minCutoff; this.beta = beta; this.dCutoff = dCutoff;
-    this.x = null; this.dx = 0; this.t = 0;
-  }
-  static alpha(cutoff, dt) { return 1 / (1 + 1 / (2 * Math.PI * cutoff * dt)); }
-  filter(x, t) {
-    if (this.x === null) { this.x = x; this.t = t; return x; }
-    const dt = Math.max(1e-3, t - this.t);
-    this.t = t;
-    const dx = (x - this.x) / dt;
-    this.dx += OneEuro.alpha(this.dCutoff, dt) * (dx - this.dx);
-    const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
-    this.x += OneEuro.alpha(cutoff, dt) * (x - this.x);
-    return this.x;
-  }
-}
-
-// Updates what is drawn for a track: its read position, or while it is briefly missed its
-// predicted position (motion damped after two passes so it cannot fly off), smoothed.
-function updateDisplay(t, now) {
-  const missed = state.passNo - t.pass;
-  const target = missed === 0 ? t.corners : predict(t, Math.min(missed, 2));
-  if (!t.filters) t.filters = Array.from({ length: 8 }, () => new OneEuro());
-  const sec = now / 1000;
-  t.disp = target.map((p, i) => [t.filters[2 * i].filter(p[0], sec), t.filters[2 * i + 1].filter(p[1], sec)]);
+// What is drawn for a track. The display shows the exact frame that was analyzed, so the
+// read corners are already where the tag is: draw them as they are, with no averaging over
+// time (which always trails real motion). Only sub-pixel twitches of a still tag are
+// ignored. A briefly missed tag stays where it was last read while it fades.
+const DEAD_ZONE = 1.2; // camera pixels
+function updateDisplay(t) {
+  if (state.passNo !== t.pass) return;
+  if (!t.disp) { t.disp = t.corners; return; }
+  t.disp = t.corners.map((p, i) => (Math.hypot(p[0] - t.disp[i][0], p[1] - t.disp[i][1]) < DEAD_ZONE ? t.disp[i] : p));
 }
 
 // Fully visible while being read; fades out over the hold when missed, in over two passes
-// when first confirmed, so tags never pop in or out.
+// when first confirmed.
 function trackAlpha(t) {
   const missed = state.passNo - t.pass;
   const out = missed === 0 ? 1 : Math.max(0, 1 - missed / (holdPasses() + 1));
@@ -448,7 +432,7 @@ function sendFrame() {
   // can re-check those spots if its full scan misses them.
   const expect = [];
   for (const t of state.tracks) {
-    if (t.hits < CONFIRM_HITS || state.passNo - t.pass > holdPasses()) continue;
+    if (t.hits < CONFIRM_HITS || state.passNo - t.pass > 2) continue;
     const c = predict(t, state.passNo + 1 - t.pass).map((p) => [(p[0] - r.x) * scale, (p[1] - r.y) * scale]);
     const [mx, my] = centroid(c);
     if (mx >= 0 && my >= 0 && mx < w && my < h) expect.push({ id: t.id, corners: c });
@@ -510,7 +494,7 @@ function onResult(markers, ms) {
   state.passNo++;
   for (const m of markers) addRead(m);
   state.tracks = state.tracks.filter((t) => state.passNo - t.pass <= holdPasses() + 1);
-  for (const t of state.tracks) if (t.hits >= CONFIRM_HITS) updateDisplay(t, now);
+  for (const t of state.tracks) if (t.hits >= CONFIRM_HITS) updateDisplay(t);
   state.lastMs = ms;
   const dt = state.detTimes;
   if (dt.length) state.passGap = state.passGap * 0.8 + Math.min(1000, now - dt[dt.length - 1]) * 0.2;
