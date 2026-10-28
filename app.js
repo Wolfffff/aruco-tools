@@ -294,8 +294,6 @@ async function startCamera() {
     check();
     if (await upgradeResolution(track)) await firstFrame();
     check();
-    btn.disabled = false;
-    btn.textContent = 'Open camera';
     if (!$('settings').hidden) renderSettings(); // shows the new stream size after a switch
     // Reveal on the first analyzed frame.
     startLoops();
@@ -307,6 +305,10 @@ async function startCamera() {
     $('top').hidden = false;
     $('bottom').hidden = false;
     $('stat').hidden = !state.showStats;
+    // Reset the start screen only now it is hidden, so "Open camera" never flashes.
+    btn.disabled = false;
+    btn.textContent = 'Open camera';
+    $('gate').classList.remove('starting');
     requestWakeLock();
     showTapHint();
   } catch (e) {
@@ -1011,8 +1013,8 @@ function renderSeen(inView = new Set()) {
       el = document.createElement('div');
       el.className = 'card';
       el.style.setProperty('--c', color(id));
-      el.innerHTML = '<span class="mini"></span><span class="meta"><b><i class="sw"></i><span></span></b><small></small></span>';
-      el.querySelector('b span').textContent = id;
+      el.innerHTML = '<span class="mini"></span><span class="meta"><b></b><small></small></span>';
+      el.querySelector('b').textContent = id;
       el.mini = el.querySelector('.mini');
       el.count = el.querySelector('small');
       el.classList.add('new');

@@ -12,7 +12,7 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="ui.css?v=24">
+<link rel="stylesheet" href="ui.css?v=25">
 <style>
   /* Reader page. Shared tokens and components live in ui.css. */
   html, body { height: 100%; overflow: hidden; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
@@ -67,18 +67,19 @@
   .list { display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none; min-width: 0; min-height: 56px; align-items: center; }
   .list::-webkit-scrollbar { display: none; }
   .list .hint { color: var(--muted); font-size: 15px; }
+  /* Each card wears its marker's colour (the same as its outline on the camera): a dim
+     border while out of view, full colour with a faint tint while in view. */
   .card {
-    flex: none; display: flex; align-items: center; gap: 10px; padding: 6px 12px 6px 6px;
-    border: 1px solid var(--line); border-radius: var(--r-s); background: var(--bg);
+    flex: none; display: flex; align-items: center; gap: 10px; padding: 6px 14px 6px 6px;
+    border: 1.5px solid color-mix(in srgb, var(--c) 35%, transparent); border-radius: var(--r-s); background: var(--bg);
+    transition: border-color 150ms, background-color 150ms;
   }
-  /* In view: the card inverts. */
-  .card.live { background: var(--fg); color: var(--bg); border-color: var(--fg); }
-  .card .mini { width: 40px; height: 40px; flex: none; }
+  .card.live { border-color: var(--c); background: color-mix(in srgb, var(--c) 14%, var(--bg)); }
+  .card .mini { width: 38px; height: 38px; flex: none; border-radius: 3px; overflow: hidden; }
   .card .mini svg { width: 100%; height: 100%; display: block; shape-rendering: crispEdges; }
   .card .meta { display: grid; line-height: 1.1; font-variant-numeric: tabular-nums; }
-  .card b { display: flex; align-items: center; gap: 6px; font: 600 20px var(--font); letter-spacing: -0.01em; }
-  .card .sw { width: 8px; height: 8px; border-radius: 2px; background: var(--c); }
-  .card small { font: 500 12px var(--font); opacity: 0.65; }
+  .card b { font: 600 20px var(--font); letter-spacing: -0.01em; }
+  .card small { font: 500 12px var(--font); color: var(--muted); }
 
   /* ---- settings sheet ---- */
   .scrim { position: fixed; inset: 0; z-index: 5; background: rgba(0,0,0,0.5); }
@@ -245,7 +246,7 @@
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="markers.js?v=24"></script>
-<script src="app.js?v=24"></script>
+<script src="markers.js?v=25"></script>
+<script src="app.js?v=25"></script>
 </body>
 </html>
