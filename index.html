@@ -12,7 +12,7 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="ui.css?v=30">
+<link rel="stylesheet" href="ui.css?v=31">
 <style>
   /* Reader page. Shared tokens and components live in ui.css. */
   html, body { height: 100%; overflow: hidden; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
@@ -125,6 +125,43 @@
   /* While the camera starts, the splash shows only the marker, the name and the status. */
   .gate.starting .pair, .gate.starting .quiet { visibility: hidden; }
 
+  /* On a computer (a mouse or trackpad and a wide window) the start page is a landing page:
+     the marker beside the actions, and a code that opens the reader on a phone. */
+  .tagline, .handoff { display: none; }
+  @media (min-width: 860px) and (hover: hover) and (pointer: fine) {
+    .gate { display: grid; place-items: center; padding: 48px; }
+    .gate .inner {
+      flex: none; max-width: 940px; display: grid; gap: 0 72px; align-items: center;
+      grid-template-columns: minmax(0, 1fr) 360px; grid-template-areas: "mark title" "mark actions";
+    }
+    .hero { display: contents; }
+    .hero .mark { grid-area: mark; justify-self: center; width: min(34vw, 400px); }
+    .title { grid-area: title; align-self: end; display: grid; gap: 10px; }
+    .gate h1 { text-align: left; font-size: 40px; }
+    .tagline { display: block; font-size: 17px; }
+    .gate .actions { grid-area: actions; align-self: start; margin-top: 28px; }
+    .gate .quiet { justify-self: start; padding: 8px 0; }
+    .err { text-align: left; }
+    /* The reader is made for phones, so the code to open it there comes first. */
+    .handoff { order: -1; display: flex; align-items: center; gap: 18px; margin-bottom: 14px; padding-bottom: 24px; border-bottom: 1px solid var(--hair); }
+    .handoff .qr { width: 120px; height: 120px; flex: none; border-radius: 6px; shape-rendering: crispEdges; }
+    .handoff p { display: grid; gap: 4px; font-size: 14px; }
+    .handoff p { font-size: 15px; }
+    .handoff b { color: var(--fg); font-weight: 600; font-size: 17px; }
+    .gate.starting .handoff { visibility: hidden; }
+
+    /* Settings: a panel on the right instead of a sheet across the whole width. */
+    .settings {
+      top: 0; left: auto; width: 440px; max-height: none; align-content: start;
+      border-top: 0; border-left: 1px solid var(--hair); border-radius: 0;
+      padding-top: 20px;
+    }
+    .settings:not([hidden]) { animation: panel-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+    .sheet header { justify-content: space-between; }
+    .sheet header select { flex: 0 1 360px; }
+  }
+  @keyframes panel-in { from { transform: translateX(40px); opacity: 0.4; } }
+
   /* ---- a shown marker, as large as fits ---- */
   .sheet { position: fixed; inset: 0; z-index: 7; background: var(--bg); display: grid; grid-template-rows: auto 1fr auto; }
   .sheet header { display: flex; align-items: center; gap: 10px; padding: calc(env(safe-area-inset-top, 0px) + 12px) var(--sr) 8px var(--sl); }
@@ -220,13 +257,20 @@
   <div class="inner">
     <figure class="hero">
       <svg class="mark" id="mark" viewBox="0 0 8 8" role="img" aria-label="An ArUco marker"></svg>
-      <h1>ArUco Reader</h1>
+      <div class="title">
+        <h1>ArUco Reader</h1>
+        <p class="tagline">Reads ArUco and AprilTag markers with your camera.</p>
+      </div>
     </figure>
     <div class="actions">
       <button class="btn ink" id="start">Open camera</button>
       <div class="pair">
         <button class="btn line" id="gateMarker">Show a marker</button>
         <a class="btn line" href="generate.html">Print markers</a>
+      </div>
+      <div class="handoff">
+        <svg class="qr" viewBox="-3 -3 35 35" role="img" aria-label="QR code for wolfffff.github.io/aruco-tools"><rect x="-3" y="-3" width="35" height="35" fill="#fff"/><path fill="#000" d="M0 0h7v1h-7zM10 0h4v1h-4zM16 0h1v1h-1zM18 0h3v1h-3zM22 0h7v1h-7zM0 1h1v1h-1zM6 1h1v1h-1zM12 1h1v1h-1zM14 1h5v1h-5zM20 1h1v1h-1zM22 1h1v1h-1zM28 1h1v1h-1zM0 2h1v1h-1zM2 2h3v1h-3zM6 2h1v1h-1zM8 2h1v1h-1zM10 2h3v1h-3zM16 2h1v1h-1zM18 2h1v1h-1zM20 2h1v1h-1zM22 2h1v1h-1zM24 2h3v1h-3zM28 2h1v1h-1zM0 3h1v1h-1zM2 3h3v1h-3zM6 3h1v1h-1zM8 3h1v1h-1zM11 3h4v1h-4zM17 3h2v1h-2zM20 3h1v1h-1zM22 3h1v1h-1zM24 3h3v1h-3zM28 3h1v1h-1zM0 4h1v1h-1zM2 4h3v1h-3zM6 4h1v1h-1zM8 4h2v1h-2zM11 4h1v1h-1zM14 4h1v1h-1zM16 4h5v1h-5zM22 4h1v1h-1zM24 4h3v1h-3zM28 4h1v1h-1zM0 5h1v1h-1zM6 5h1v1h-1zM8 5h6v1h-6zM15 5h3v1h-3zM22 5h1v1h-1zM28 5h1v1h-1zM0 6h7v1h-7zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h1v1h-1zM20 6h1v1h-1zM22 6h7v1h-7zM8 7h4v1h-4zM14 7h1v1h-1zM16 7h1v1h-1zM18 7h1v1h-1zM0 8h1v1h-1zM2 8h5v1h-5zM10 8h1v1h-1zM12 8h2v1h-2zM17 8h1v1h-1zM19 8h1v1h-1zM22 8h5v1h-5zM2 9h1v1h-1zM9 9h5v1h-5zM16 9h9v1h-9zM28 9h1v1h-1zM1 10h1v1h-1zM3 10h1v1h-1zM6 10h1v1h-1zM9 10h3v1h-3zM13 10h3v1h-3zM18 10h1v1h-1zM0 11h1v1h-1zM5 11h1v1h-1zM8 11h1v1h-1zM14 11h3v1h-3zM20 11h6v1h-6zM27 11h1v1h-1zM3 12h1v1h-1zM5 12h2v1h-2zM15 12h3v1h-3zM20 12h1v1h-1zM25 12h2v1h-2zM0 13h1v1h-1zM2 13h3v1h-3zM7 13h2v1h-2zM11 13h3v1h-3zM16 13h9v1h-9zM28 13h1v1h-1zM0 14h5v1h-5zM6 14h5v1h-5zM12 14h6v1h-6zM20 14h1v1h-1zM24 14h3v1h-3zM0 15h5v1h-5zM7 15h1v1h-1zM9 15h1v1h-1zM12 15h2v1h-2zM15 15h2v1h-2zM21 15h3v1h-3zM27 15h1v1h-1zM6 16h1v1h-1zM8 16h1v1h-1zM10 16h1v1h-1zM12 16h1v1h-1zM14 16h1v1h-1zM17 16h3v1h-3zM25 16h2v1h-2zM0 17h1v1h-1zM2 17h2v1h-2zM5 17h1v1h-1zM7 17h1v1h-1zM9 17h1v1h-1zM17 17h8v1h-8zM26 17h1v1h-1zM28 17h1v1h-1zM0 18h1v1h-1zM3 18h1v1h-1zM5 18h2v1h-2zM8 18h1v1h-1zM10 18h1v1h-1zM15 18h3v1h-3zM20 18h1v1h-1zM23 18h1v1h-1zM26 18h1v1h-1zM0 19h1v1h-1zM2 19h1v1h-1zM5 19h1v1h-1zM7 19h3v1h-3zM14 19h1v1h-1zM16 19h1v1h-1zM19 19h5v1h-5zM27 19h1v1h-1zM0 20h1v1h-1zM4 20h1v1h-1zM6 20h1v1h-1zM9 20h2v1h-2zM17 20h1v1h-1zM20 20h5v1h-5zM26 20h3v1h-3zM8 21h1v1h-1zM11 21h1v1h-1zM13 21h2v1h-2zM16 21h1v1h-1zM18 21h1v1h-1zM20 21h1v1h-1zM24 21h5v1h-5zM0 22h7v1h-7zM9 22h8v1h-8zM18 22h3v1h-3zM22 22h1v1h-1zM24 22h3v1h-3zM0 23h1v1h-1zM6 23h1v1h-1zM8 23h1v1h-1zM10 23h4v1h-4zM19 23h2v1h-2zM24 23h1v1h-1zM28 23h1v1h-1zM0 24h1v1h-1zM2 24h3v1h-3zM6 24h1v1h-1zM8 24h1v1h-1zM11 24h2v1h-2zM14 24h2v1h-2zM17 24h1v1h-1zM20 24h5v1h-5zM26 24h1v1h-1zM0 25h1v1h-1zM2 25h3v1h-3zM6 25h1v1h-1zM8 25h1v1h-1zM12 25h2v1h-2zM16 25h1v1h-1zM20 25h1v1h-1zM25 25h4v1h-4zM0 26h1v1h-1zM2 26h3v1h-3zM6 26h1v1h-1zM8 26h1v1h-1zM10 26h2v1h-2zM13 26h1v1h-1zM15 26h13v1h-13zM0 27h1v1h-1zM6 27h1v1h-1zM9 27h2v1h-2zM15 27h2v1h-2zM18 27h1v1h-1zM20 27h1v1h-1zM23 27h1v1h-1zM25 27h1v1h-1zM27 27h1v1h-1zM0 28h7v1h-7zM8 28h1v1h-1zM13 28h1v1h-1zM15 28h3v1h-3zM21 28h6v1h-6z"/></svg>
+        <p><b>Best on a phone</b>Scan with your phone's camera to open the reader there.</p>
       </div>
       <a class="quiet" href="bench.html">Speed test</a>
       <div class="err" id="err" hidden></div>
@@ -252,7 +296,7 @@
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="markers.js?v=30"></script>
-<script src="app.js?v=30"></script>
+<script src="markers.js?v=31"></script>
+<script src="app.js?v=31"></script>
 </body>
 </html>

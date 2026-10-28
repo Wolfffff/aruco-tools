@@ -7,7 +7,7 @@
 <title>Print Markers</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="ui.css?v=30">
+<link rel="stylesheet" href="ui.css?v=31">
 <style>
   /* Sheet generator. Shared tokens and components live in ui.css. The sheets are white
      paper (that is what gets printed) on the dark page. */
@@ -31,6 +31,22 @@
     .fold span { flex: 1; min-width: 0; font: 500 15px var(--font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .controls.folded > :not(h1):not(.fold):not(.print):not(.warn) { display: none !important; }
     .controls { position: static; }
+  }
+  /* Wide screens: settings in a column on the left, pages side by side on the right, each
+     scaled to fit the window's height. */
+  @media (min-width: 960px) {
+    body { display: grid; grid-template-columns: 340px minmax(0, 1fr); grid-template-rows: auto 1fr; min-height: 100vh; }
+    .controls {
+      grid-row: 1 / 3; position: sticky; top: 0; height: 100vh; overflow-y: auto;
+      display: grid; grid-template-columns: 1fr 1fr; align-content: start; gap: 16px 12px;
+      padding: 24px; border-bottom: 0; border-right: 1px solid var(--hair);
+    }
+    .controls h1, .controls .wide, .controls .print, .controls .note { grid-column: 1 / -1; }
+    .controls h1 { margin-bottom: 8px; }
+    .controls select, .controls input, .controls input.ids, .controls input[type=number] { width: 100%; }
+    .controls .print { margin-top: 8px; }
+    .summary { padding: 24px 32px 0; }
+    .pages { display: flex; flex-wrap: wrap; justify-content: center; align-content: start; gap: 24px; padding: 16px 32px 48px; }
   }
   .summary { margin: 0; padding: 14px var(--sr) 0 var(--sl); color: var(--muted); font: 500 14px var(--font); font-variant-numeric: tabular-nums; }
 
@@ -64,14 +80,14 @@
 <div class="controls folded" id="controls">
   <h1>Print markers <a class="btn line small" href="./">Reader</a></h1>
   <div class="fold"><span id="foldText"></span><button class="btn line small" id="foldBtn" aria-expanded="false" aria-controls="controls">Edit</button></div>
-  <label>Set <select id="set"></select></label>
+  <label class="wide">Set <select id="set"></select></label>
   <label>Paper <select id="paper"><option value="a4">A4</option><option value="letter">Letter</option></select></label>
   <label>Orientation <select id="orient"><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
   <label>Size, mm <input id="size" type="number" min="10" max="250" value="50" inputmode="decimal"></label>
   <label>IDs <select id="mode"><option value="fill">Fill pages</option><option value="list">List</option></select></label>
   <label data-mode="fill">From ID <input id="start" type="number" min="0" value="0" inputmode="numeric"></label>
   <label data-mode="fill">Pages <input id="pages" type="number" min="1" max="300" value="1" inputmode="numeric"></label>
-  <label data-mode="list" hidden>List <input id="ids" class="ids" value="0-11" placeholder="0-11, 20-24" inputmode="numeric"></label>
+  <label class="wide" data-mode="list" hidden>List <input id="ids" class="ids" value="0-11" placeholder="0-11, 20-24" inputmode="numeric"></label>
   <label>Labels <select id="labels"><option value="1">On</option><option value="0">Off</option></select></label>
   <label>Cut lines <select id="cuts"><option value="1">On</option><option value="0">Off</option></select></label>
   <button class="btn ink print" id="print">Print</button>
@@ -83,7 +99,7 @@
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="markers.js?v=30"></script>
+<script src="markers.js?v=31"></script>
 <script>
 const SETS = MARKER_SETS.map((s) => ({ label: s.name, base: s.base, count: s.count }));
 const PAPERS = { a4: { name: 'A4', w: 210, h: 297 }, letter: { name: 'letter', w: 215.9, h: 279.4 } };
@@ -170,7 +186,13 @@ const out = $('pages-out');
 function fitScale() {
   const pw = parseFloat(out.style.getPropertyValue('--pw')) || 210;
   const room = out.clientWidth - parseFloat(getComputedStyle(out).paddingLeft) - parseFloat(getComputedStyle(out).paddingRight);
-  out.style.setProperty('--s', Math.min(1, room / (pw * 96 / 25.4)).toFixed(4));
+  let s = Math.min(1, room / (pw * 96 / 25.4));
+  // Beside the settings column, a whole page fits in the window's height too.
+  if (matchMedia('(min-width: 960px)').matches) {
+    const ph = parseFloat(out.style.getPropertyValue('--ph')) || 297;
+    s = Math.min(s, (innerHeight - out.getBoundingClientRect().top - scrollY - 48) / (ph * 96 / 25.4));
+  }
+  out.style.setProperty('--s', Math.max(0.1, s).toFixed(4));
 }
 
 let token = 0;

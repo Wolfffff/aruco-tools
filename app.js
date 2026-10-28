@@ -353,7 +353,7 @@ async function startCamera() {
     $('stat').hidden = !state.showStats;
     // Reset the start screen only now it is hidden, so "Open camera" never flashes.
     btn.disabled = false;
-    btn.textContent = 'Open camera';
+    btn.textContent = startLabel;
     $('gate').classList.remove('starting');
     requestWakeLock();
     showTapHint();
@@ -367,7 +367,7 @@ async function startCamera() {
     video.srcObject = null;
     state.track = null;
     btn.disabled = false;
-    btn.textContent = 'Open camera';
+    btn.textContent = startLabel;
     $('gate').classList.remove('starting');
     // If the camera was already showing (a lens or 4K switch), bring the start screen back
     // so the message and the button are visible.
@@ -376,8 +376,8 @@ async function startCamera() {
     $('top').hidden = true;
     $('bottom').hidden = true;
     showError(e.name === 'NotAllowedError'
-      ? 'Camera access is off for this site. Allow it in the browser settings, then tap Open camera.'
-      : `The camera did not start (${e.message || e.name}). Tap Open camera to try again.`);
+      ? 'Camera access is off for this site. Allow it in the browser settings, then try again.'
+      : `The camera did not start (${e.message || e.name}). Try again.`);
   }
 }
 
@@ -1337,9 +1337,21 @@ renderSettings();
 renderSeen();
 warmWorkers();
 
-// Open straight into the reader. The start screen is only a splash while the camera
-// starts; its buttons matter only if the camera can't start (access denied, no camera).
-startCamera();
+// Phones and tablets open straight into the reader; the start screen is only a splash
+// while the camera starts, and its buttons matter only if the camera can't start. On a
+// computer it is a landing page (print or show markers, or scan a code to open the reader
+// on a phone) and the camera opens on request.
+let startLabel = 'Open camera';
+const desktop = matchMedia('(hover: hover) and (pointer: fine)').matches;
+if (desktop) {
+  $('tapHint').textContent = 'Click to pause';
+  $('copyHint').textContent = 'Click a marker to copy its ID';
+  startLabel = "Use this computer's camera";
+  $('start').textContent = startLabel;
+  $('start').classList.replace('ink', 'line');
+} else {
+  startCamera();
+}
 
 // Start screen: a real 4×4 marker that flips its cells from one ID to the next, the way
 // the reader sees them. One cell wave every two seconds while the start screen shows.
