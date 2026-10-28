@@ -65,6 +65,7 @@ const state = {
   showStats: store.get('stats') === '1',
   flip: false, // in auto mode, alternates whole-frame and center passes
   paused: false,
+  switching: false, // camera restarting: keep the last frame on screen
   busy: false,
   pending: false,
   loopsStarted: false,
@@ -116,6 +117,9 @@ async function startCamera() {
     // iOS can paint the first frames before the video knows its real size, which shows
     // as a small picture that then jumps to full screen. Reveal only a real frame.
     await firstFrame();
+    // Settle on the final stream size while the start screen still covers everything,
+    // so the picture never visibly switches resolution after it appears.
+    if (await upgradeResolution(state.track)) await firstFrame();
     btn.disabled = false;
     btn.textContent = 'Open camera';
     if (!$('settings').hidden) renderSettings(); // shows the new stream size after a switch
@@ -125,7 +129,6 @@ async function startCamera() {
     $('stat').hidden = !state.showStats;
     requestWakeLock();
     startLoops();
-    upgradeResolution(state.track);
   } catch (e) {
     btn.disabled = false;
     btn.textContent = 'Open camera';
@@ -140,9 +143,9 @@ async function startCamera() {
 async function upgradeResolution(track) {
   const [W, H] = CAMERA_SIZES[state.cam];
   const longSide = () => { const st = track.getSettings?.() || {}; return Math.max(st.width || 0, st.height || 0); };
-  const settle = () => new Promise((r) => setTimeout(r, 400));
+  const settle = () => new Promise((r) => setTimeout(r, 250));
   let best = longSide(), bestAsk = null;
-  if (!best || best >= W * 0.9) return;
+  if (!best || best >= W * 0.9) return false;
   const asks = [
     { width: { ideal: H }, height: { ideal: W } }, // the same size, asked portrait-first
     { width: { ideal: W } },
@@ -150,7 +153,7 @@ async function upgradeResolution(track) {
     { width: { min: Math.round(W * 0.66), ideal: W } },
   ];
   for (const ask of asks) {
-    if (state.track !== track) return; // the camera was switched meanwhile
+    if (state.track !== track) return false; // the camera was switched meanwhile
     try { await track.applyConstraints({ ...ask, frameRate: { ideal: 30 } }); } catch { continue; }
     await settle();
     const got = longSide();
@@ -162,7 +165,7 @@ async function upgradeResolution(track) {
     await track.applyConstraints({ ...bestAsk, frameRate: { ideal: 30 } }).catch(() => {});
   }
   state.tracks = []; // positions may now be in a different stream size
-  if (!$('settings').hidden) renderSettings();
+  return Boolean(bestAsk);
 }
 
 // Resolves once a frame with real dimensions has been presented (or after 2 s, as a fallback).
@@ -263,12 +266,18 @@ document.addEventListener('visibilitychange', () => {
 });
 
 async function restartCamera() {
+  // Hold the last analyzed frame on screen until the new stream has settled.
+  state.switching = true;
   state.track?.stop();
   state.track = null;
   state.busy = false;
   state.tracks = []; // positions are in the old stream's pixels
-  state.shown = state.inflight = null;
-  await startCamera();
+  state.inflight = null;
+  try {
+    await startCamera();
+  } finally {
+    state.switching = false;
+  }
 }
 
 /* ---------- detection ---------- */
@@ -284,7 +293,7 @@ function scanRect(vw, vh, center) {
 
 function sendFrame() {
   const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || video.readyState < 2) return;
+  if (!vw || video.readyState < 2 || state.switching) return;
   state.flip = !state.flip;
   const center = state.area === 'center' || (state.area === 'auto' && state.flip);
   const r = scanRect(vw, vh, center);
@@ -308,7 +317,7 @@ function sendFrame() {
 worker.onmessage = (e) => {
   state.busy = false;
   const { markers, ms, error } = e.data;
-  if (!state.paused) {
+  if (!state.paused && !state.switching) {
     // Show the frame that was just analyzed, so outlines match the picture exactly.
     if (state.inflight) { state.shown = state.inflight; state.inflight = null; viewDirty = true; }
     if (error) console.error(error);
@@ -427,6 +436,7 @@ function draw() {
   if (overlay.width !== cw || overlay.height !== ch) { overlay.width = cw; overlay.height = ch; viewDirty = true; }
   const vw = video.videoWidth, vh = video.videoHeight;
   const shot = state.shown;
+  if (state.switching && shot) { octx.drawImage(shot.canvas, 0, 0); return; }
   // Until the first analyzed frame arrives, show the live camera.
   if (!shot || shot.canvas.width !== cw || shot.canvas.height !== ch) {
     octx.fillStyle = '#000';

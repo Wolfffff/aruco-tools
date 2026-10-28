@@ -1,7 +1,7 @@
 // Network first so updates show up immediately; cache is the offline fallback.
 // `no-cache` makes the browser check with the server instead of trusting its own
 // HTTP cache, so a new release is never served half old, half new.
-const CACHE = 'aruco-tools-v9';
+const CACHE = 'aruco-tools-v10';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', (e) => {
