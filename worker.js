@@ -138,13 +138,16 @@ function decode(det, candidate, maxErrors) {
     }
     bits.push(row);
   }
-  if (unsure > maxErrors) return null;
+  // Blur leaves a few in-between cells on real tags. Tolerate a handful, but only when
+  // the rest of the code then matches exactly (or within the chosen correction).
+  const blurAllowance = Math.max(1, Math.floor(det.dictionary.nBits / 8));
+  if (unsure > blurAllowance + maxErrors) return null;
   if (ones === 0) return null; // an all-black square is not a tag
 
   let best = null, rot = 0, cur = bits;
   for (let r = 0; r < 4; r++) {
     const f = det.dictionary.find(cur);
-    if (f && f.distance + unsure <= maxErrors && (!best || f.distance < best.distance)) {
+    if (f && f.distance <= maxErrors && (!best || f.distance < best.distance)) {
       best = f; rot = r;
       if (f.distance === 0) break;
     }

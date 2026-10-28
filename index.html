@@ -48,7 +48,7 @@
   }
   .chipbtn {
     display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px;
-    border: 0; border-radius: 18px; font: 600 13px var(--mono);
+    border: 0; border-radius: 18px; font: 600 14px var(--sans);
   }
   .chipbtn .caret { color: var(--dim); }
   .round { width: 44px; height: 44px; border-radius: 50%; border: 0; display: grid; place-items: center; flex: none; }
@@ -99,9 +99,17 @@
   .opts { display: flex; flex-wrap: wrap; gap: 6px; }
   .opts button {
     height: 36px; padding: 0 12px; border-radius: 9px; border: 1px solid var(--hair);
-    background: rgba(255,255,255,0.05); font: 600 13px var(--mono);
+    background: rgba(255,255,255,0.05); font: 600 14px var(--sans);
   }
   .opts button[aria-pressed="true"] { background: var(--fg); color: #000; border-color: var(--fg); }
+  .dictname { margin: -10px 0 0; font: 12px var(--mono); color: var(--dim); }
+  .more { display: grid; gap: 18px; }
+  .more summary { cursor: pointer; font-weight: 600; color: var(--dim); list-style: none; display: flex; align-items: center; gap: 6px; }
+  .more summary::-webkit-details-marker { display: none; }
+  .more summary::before { content: "›"; display: inline-block; transition: transform .15s; font-size: 18px; line-height: 1; }
+  .more[open] summary::before { transform: rotate(90deg); }
+  .more[open] { gap: 18px; }
+  .more > .group { margin-top: 14px; }
   .links { display: flex; flex-wrap: wrap; gap: 8px; }
   .links a, .links button { height: 40px; display: inline-flex; align-items: center; padding: 0 14px; border-radius: 10px; border: 1px solid var(--hair); background: transparent; color: var(--fg); text-decoration: none; font-weight: 600; font-size: 14px; }
 
@@ -142,7 +150,7 @@
 </div>
 
 <div class="top" id="top" hidden>
-  <button class="chipbtn glass" id="setBtn"><span class="dot" id="live"></span><span id="setName">DICT_4X4_50</span><span class="caret">▾</span></button>
+  <button class="chipbtn glass" id="setBtn"><span class="dot" id="live"></span><span id="setName">4×4 · 50 IDs</span><span class="caret">▾</span></button>
   <span class="spacer"></span>
   <button class="round glass" id="torch" hidden aria-pressed="false" aria-label="Flashlight">
     <svg class="i" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>
@@ -171,32 +179,36 @@
   <div class="grab"></div>
   <header><h2>Settings</h2><button class="done" id="settingsDone">Done</button></header>
   <div class="group">
-    <h3>Marker family</h3>
+    <h3>Marker type</h3>
     <div class="opts" id="family"></div>
   </div>
   <div class="group" id="sizeGroup">
-    <h3>Set size</h3>
+    <h3>IDs in set</h3>
     <div class="opts" id="size"></div>
   </div>
+  <p class="dictname" id="dictName"></p>
   <div class="group">
-    <h3>Detection resolution</h3>
-    <div class="opts" id="resOpts"></div>
-    <p>Higher reads smaller and farther tags. Lower is faster on older phones.</p>
+    <h3>Speed</h3>
+    <div class="opts" id="speedOpts"></div>
+    <p>Max detail reads smaller, farther tags but runs slower.</p>
   </div>
-  <div class="group">
-    <h3>Range</h3>
-    <div class="opts" id="areaOpts"></div>
-    <p>Auto alternates the whole frame with a 2× center pass, so distant tags read too.</p>
-  </div>
-  <div class="group">
-    <h3>Error correction</h3>
-    <div class="opts" id="correctOpts"></div>
-    <p>Off accepts only clean reads. On recovers damaged or blurry tags but can misread busy scenes.</p>
-  </div>
-  <div class="group">
-    <h3>Performance overlay</h3>
-    <div class="opts" id="statOpts"></div>
-  </div>
+  <details class="more">
+    <summary>More</summary>
+    <div class="group">
+      <h3>Range</h3>
+      <div class="opts" id="areaOpts"></div>
+      <p>Auto alternates the whole frame with a 2× center pass, so distant tags read too.</p>
+    </div>
+    <div class="group">
+      <h3>Error correction</h3>
+      <div class="opts" id="correctOpts"></div>
+      <p>Recovers damaged or blurry tags. Leave off if you see wrong IDs.</p>
+    </div>
+    <div class="group">
+      <h3>Speed readout</h3>
+      <div class="opts" id="statOpts"></div>
+    </div>
+  </details>
   <div class="links">
     <button id="showMarker">Show a marker</button>
     <a href="generate.html">Print marker sheets</a>

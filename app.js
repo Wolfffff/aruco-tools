@@ -9,16 +9,17 @@ const gctx = grab.getContext('2d', { willReadFrequently: true });
 
 // OpenCV's DICT_NxN_50/100/250 are the first codes of DICT_NxN_1000; smaller sets
 // leave more room between codes, so fewer random patterns can match one.
+// `key` is stored in localStorage (and read by the sheet generator); `label` is what people see.
 const FAMILIES = [
-  { key: '4x4', base: 'ARUCO_4X4_1000', name: 'DICT_4X4', sizes: [50, 100, 250, 1000] },
-  { key: '5x5', base: 'ARUCO_5X5_1000', name: 'DICT_5X5', sizes: [50, 100, 250, 1000] },
-  { key: '6x6', base: 'ARUCO_6X6_1000', name: 'DICT_6X6', sizes: [50, 100, 250, 1000] },
-  { key: '7x7', base: 'ARUCO_7X7_1000', name: 'DICT_7X7', sizes: [50, 100, 250, 1000] },
-  { key: 'Original', base: 'ARUCO_DEFAULT_OPENCV', name: 'DICT_ARUCO_ORIGINAL' },
-  { key: 'MIP 36h12', base: 'ARUCO_MIP_36h12', name: 'DICT_ARUCO_MIP_36h12' },
-  { key: 'April 16h5', base: 'APRILTAG_16h5', name: 'DICT_APRILTAG_16h5' },
-  { key: 'April 25h9', base: 'APRILTAG_25h9', name: 'DICT_APRILTAG_25h9' },
-  { key: 'April 36h11', base: 'APRILTAG_36h11', name: 'DICT_APRILTAG_36h11' },
+  { key: '4x4', label: '4×4', base: 'ARUCO_4X4_1000', name: 'DICT_4X4', sizes: [50, 100, 250, 1000] },
+  { key: '5x5', label: '5×5', base: 'ARUCO_5X5_1000', name: 'DICT_5X5', sizes: [50, 100, 250, 1000] },
+  { key: '6x6', label: '6×6', base: 'ARUCO_6X6_1000', name: 'DICT_6X6', sizes: [50, 100, 250, 1000] },
+  { key: '7x7', label: '7×7', base: 'ARUCO_7X7_1000', name: 'DICT_7X7', sizes: [50, 100, 250, 1000] },
+  { key: 'Original', label: 'ArUco original', base: 'ARUCO_DEFAULT_OPENCV', name: 'DICT_ARUCO_ORIGINAL' },
+  { key: 'MIP 36h12', label: 'ArUco MIP', base: 'ARUCO_MIP_36h12', name: 'DICT_ARUCO_MIP_36h12' },
+  { key: 'April 16h5', label: 'AprilTag 16h5', base: 'APRILTAG_16h5', name: 'DICT_APRILTAG_16h5' },
+  { key: 'April 25h9', label: 'AprilTag 25h9', base: 'APRILTAG_25h9', name: 'DICT_APRILTAG_25h9' },
+  { key: 'April 36h11', label: 'AprilTag 36h11', base: 'APRILTAG_36h11', name: 'DICT_APRILTAG_36h11' },
 ];
 const DICT_FILES = {
   ARUCO_4X4_1000: 'aruco_4x4_1000',
@@ -31,7 +32,8 @@ const DICT_FILES = {
   APRILTAG_25h9: 'apriltag_25h9',
   APRILTAG_16h5: 'apriltag_16h5',
 };
-const RES_OPTIONS = [[0, 'Full'], [1280, '1280'], [960, '960'], [640, '640']]; // 0 = camera's native size
+// Longest side of the frame handed to the detector; 0 = the camera's native size (1080p).
+const SPEED_OPTIONS = [[960, 'Fast'], [0, 'Max detail']];
 const AREA_OPTIONS = [['auto', 'Auto'], ['full', 'Whole frame'], ['center', 'Far only (2×)']];
 
 // A tag is shown only after it is read twice in a row at the same place,
@@ -50,7 +52,7 @@ const store = {
 const state = {
   family: FAMILIES.find((f) => f.key === store.get('family')) || FAMILIES[0],
   size: +(store.get('size') || 50),
-  res: store.get('res2') != null ? +store.get('res2') : 0,
+  res: SPEED_OPTIONS.some(([v]) => String(v) === store.get('speed')) ? +store.get('speed') : 960,
   area: AREA_OPTIONS.some(([v]) => v === store.get('area')) ? store.get('area') : 'auto',
   correct: store.get('correct') === '1',
   showStats: store.get('stats') === '1',
@@ -453,30 +455,31 @@ function options(el, list, current, onPick) {
 }
 
 function renderSettings() {
-  options($('family'), FAMILIES.map((f) => [f, f.key]), state.family, (f) => {
+  options($('family'), FAMILIES.map((f) => [f, f.label]), state.family, (f) => {
     state.family = f;
     if (f.sizes && !f.sizes.includes(state.size)) state.size = f.sizes[0];
     store.set('family', f.key);
     resetReads();
   });
   $('sizeGroup').hidden = !state.family.sizes;
-  options($('size'), (state.family.sizes || []).map((n) => [n, '_' + n]), state.size, (n) => {
+  options($('size'), (state.family.sizes || []).map((n) => [n, String(n)]), state.size, (n) => {
     state.size = n;
     store.set('size', String(n));
     resetReads();
   });
-  options($('resOpts'), RES_OPTIONS, state.res, (v) => { state.res = v; store.set('res2', String(v)); });
+  $('dictName').textContent = `OpenCV: ${setLabel()}`;
+  options($('speedOpts'), SPEED_OPTIONS, state.res, (v) => { state.res = v; store.set('speed', String(v)); });
   options($('areaOpts'), AREA_OPTIONS, state.area, (v) => { state.area = v; store.set('area', v); });
   options($('correctOpts'), [[false, 'Off'], [true, 'On']], state.correct, (v) => {
     state.correct = v;
     store.set('correct', v ? '1' : '0');
   });
-  options($('statOpts'), [[false, 'Hidden'], [true, 'Shown']], state.showStats, (v) => {
+  options($('statOpts'), [[false, 'Off'], [true, 'On']], state.showStats, (v) => {
     state.showStats = v;
     store.set('stats', v ? '1' : '0');
     $('stat').hidden = !v || $('top').hidden;
   });
-  $('setName').textContent = setLabel();
+  $('setName').textContent = state.family.label + (state.family.sizes ? ` · ${state.size} IDs` : '');
 }
 
 function resetReads() {
