@@ -122,12 +122,15 @@ async function startCamera() {
     btn.disabled = false;
     btn.textContent = 'Open camera';
     if (!$('settings').hidden) renderSettings(); // shows the new stream size after a switch
+    // Reveal on the first analyzed frame, so every picture on screen comes from the same
+    // snapshot pipeline (a raw video frame can be cropped slightly differently on iOS).
+    startLoops();
+    await firstShown();
     $('gate').hidden = true;
     $('top').hidden = false;
     $('bottom').hidden = false;
     $('stat').hidden = !state.showStats;
     requestWakeLock();
-    startLoops();
   } catch (e) {
     btn.disabled = false;
     btn.textContent = 'Open camera';
@@ -167,25 +170,42 @@ async function upgradeResolution(track) {
   return Boolean(bestAsk);
 }
 
-// Resolves as soon as the video has a decoded frame with its real size (or after 2 s, as a
-// fallback). The canvas paints from that size, so nothing on screen can appear small.
+// Resolves once the camera is really running at its final shape: a frame has been decoded
+// and the reported size has not changed for ~150 ms. iPhones can report a landscape size
+// for a moment before rotation is applied; revealing then would show the picture jump.
+// Gives up waiting after 1.5 s.
 function firstFrame() {
   return new Promise((resolve) => {
     const t0 = performance.now();
+    let size = '', since = t0;
     const check = () => {
-      if ((video.videoWidth > 0 && video.readyState >= 2) || performance.now() - t0 > 2000) resolve();
+      const now = performance.now();
+      const ready = video.videoWidth > 0 && video.readyState >= 2;
+      const cur = ready ? video.videoWidth + 'x' + video.videoHeight : '';
+      if (cur !== size) { size = cur; since = now; }
+      if ((ready && now - since >= 150) || now - t0 > 1500) resolve();
       else setTimeout(check, 16);
     };
     check();
   });
 }
 
+// Resolves when the first analyzed frame is ready to show (or after 1 s, as a fallback).
+function firstShown() {
+  return new Promise((resolve) => {
+    const t0 = performance.now();
+    const check = () => {
+      if (state.shown || state.switching || performance.now() - t0 > 1000) resolve();
+      else setTimeout(check, 8);
+    };
+    check();
+  });
+}
+
 function setupTrackControls() {
+  // No focus/exposure requests: continuous is already the default on phones, and on
+  // iPhones an extra request can make the camera reconfigure (a visible jump).
   const caps = state.track.getCapabilities?.() || {};
-  const adv = {};
-  if (caps.focusMode?.includes('continuous')) adv.focusMode = 'continuous';
-  if (caps.exposureMode?.includes('continuous')) adv.exposureMode = 'continuous';
-  if (Object.keys(adv).length) state.track.applyConstraints({ advanced: [adv] }).catch(() => {});
   $('torch').hidden = !caps.torch;
   // Use the camera's own zoom where the browser exposes it; otherwise zoom digitally.
   const hw = caps.zoom && caps.zoom.max > caps.zoom.min;
@@ -273,10 +293,11 @@ async function restartCamera() {
 
 /* ---------- detection ---------- */
 
-// Detection workers. Two on phones with four or more cores, so a new frame can start while
-// the previous one is still being read; results carry a sequence number and a late result
-// never replaces a newer frame on screen.
-const workers = Array.from({ length: (navigator.hardwareConcurrency || 2) >= 4 ? 2 : 1 }, () => {
+// Two detection workers, so a new frame can start while the previous one is still being
+// read; results carry a sequence number and a late result never replaces a newer frame on
+// screen. Safari under-reports cores on purpose (an iPhone has six), so only a browser that
+// reports a single core gets one worker.
+const workers = Array.from({ length: (navigator.hardwareConcurrency || 2) > 1 ? 2 : 1 }, () => {
   const w = new Worker('worker.js' + BUILD);
   w.busy = false;
   w.onmessage = (e) => onWorkerMessage(w, e.data);
@@ -323,6 +344,15 @@ function sendFrame() {
   worker.busy = true;
   if (bitmapPath) {
     createImageBitmap(video).then((bitmap) => {
+      if (bitmap.width !== vw || bitmap.height !== vh) {
+        // Some browsers snapshot the raw, unrotated sensor frame. Painting or reading that
+        // would be sideways, so use the plain path on this phone from now on.
+        bitmap.close();
+        bitmapPath = false;
+        worker.busy = false;
+        sendFrame();
+        return;
+      }
       inflight.set(seq, takeShot(bitmap, vw, vh)); // the same frame, sized for the screen
       worker.postMessage({ ...msg, bitmap, crop: r }, [bitmap]);
     }, () => {
@@ -468,8 +498,17 @@ function releaseShot(shot) {
   if (shot && shotPool.length < 4) shotPool.push(shot.canvas);
 }
 
+let lastVideoSize = '';
+
 function draw() {
   const { dpr, cw, ch } = screenSize();
+  // If the stream changes shape mid-session (rotation, a camera reconfiguring), drop
+  // tags and frames from the old shape rather than drawing them in the wrong place.
+  const size = video.videoWidth + 'x' + video.videoHeight;
+  if (size !== lastVideoSize) {
+    if (lastVideoSize) { state.tracks = []; releaseShot(state.shown); state.shown = null; }
+    lastVideoSize = size;
+  }
   if (overlay.width !== cw || overlay.height !== ch) { overlay.width = cw; overlay.height = ch; viewDirty = true; }
   const vw = video.videoWidth, vh = video.videoHeight;
   const shot = state.shown;
