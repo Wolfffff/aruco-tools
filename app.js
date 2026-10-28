@@ -915,7 +915,7 @@ function drawLabel(id, q, alpha, dpr) {
   const step = 2 * dpr;
   const fs = Math.max(12 * dpr, Math.min(20 * dpr, Math.round((sideLen(q) * 0.2) / step) * step));
   octx.globalAlpha = alpha;
-  octx.font = `700 ${fs}px -apple-system, system-ui, 'Segoe UI', Roboto, sans-serif`;
+  octx.font = `600 ${fs}px Geist, -apple-system, system-ui, sans-serif`;
   const label = String(id);
   const tw = octx.measureText(label).width;
   const lx = centroid(q)[0];
@@ -1137,6 +1137,7 @@ function setFrozen(frozen) {
   $('tapHint').hidden = true;
   state.paused = frozen;
   $('frozen').hidden = !frozen;
+  document.body.classList.toggle('paused', frozen);
   if (frozen) video.pause();
   else video.play().catch(() => {});
 }

@@ -6,12 +6,13 @@
 <meta name="theme-color" content="#000000">
 <title>Reader Speed Test</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="ui.css?v=23">
+<link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="ui.css?v=24">
 <style>
   /* Speed test. Shared tokens and components live in ui.css. */
   main { max-width: 560px; margin: 0 auto; padding: calc(env(safe-area-inset-top, 0px) + 20px) var(--sr) 32px var(--sl); display: grid; gap: 18px; }
   header { display: flex; align-items: center; gap: 12px; }
-  h1 { flex: 1; font: 700 22px/1.2 var(--font); }
+  h1 { flex: 1; font: 600 21px/1.2 var(--font); letter-spacing: -0.015em; }
   p { margin: 0; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; }
   .wrap { overflow-x: auto; }
@@ -49,7 +50,7 @@
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
 <script src="vendor/dictionaries/aruco_4x4_1000.js"></script>
-<script src="markers.js?v=23"></script>
+<script src="markers.js?v=24"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const SIZES = [640, 960, 1280, 1920];

@@ -11,7 +11,8 @@
 <title>ArUco Reader</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="stylesheet" href="ui.css?v=23">
+<link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="ui.css?v=24">
 <style>
   /* Reader page. Shared tokens and components live in ui.css. */
   html, body { height: 100%; overflow: hidden; -webkit-user-select: none; user-select: none; touch-action: manipulation; }
@@ -32,7 +33,7 @@
     padding: calc(env(safe-area-inset-top, 0px) + 8px) var(--sr) 8px var(--sl);
   }
   .top .spacer { flex: 1; }
-  .setbtn { display: inline-flex; align-items: center; gap: 10px; height: 44px; padding: 0 14px; border: 0; border-radius: var(--r-s); font: 600 15px var(--font); }
+  .setbtn { display: inline-flex; align-items: center; gap: 10px; height: 44px; padding: 0 14px; border: 0; border-radius: var(--r-s); font: 500 15px var(--font); }
   .setbtn svg { width: 12px; height: 12px; }
   /* Live indicator: a marker cell, filled while frames are being read. */
   .cellmark { width: 10px; height: 10px; border: 2px solid currentColor; }
@@ -45,14 +46,19 @@
   .pill { position: fixed; z-index: 2; left: 50%; transform: translateX(-50%); padding: 9px 14px; border-radius: var(--r-s); font: 600 15px var(--font); pointer-events: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .zoomhint { bottom: calc(var(--panel-h, 140px) + 14px); opacity: 0; transition: opacity .25s; }
   .zoomhint.on { opacity: 1; transition: none; }
-  .frozen, .taphint { top: 50%; transform: translate(-50%, -50%); }
+  .taphint { top: 50%; transform: translate(-50%, -50%); }
+  /* Paused: a white frame around the picture and a small label, nothing over the markers. */
+  .frozen { top: calc(env(safe-area-inset-top, 0px) + 64px); display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px; font-size: 14px; }
+  .frozen svg { width: 12px; height: 12px; }
+  #stage::after { content: ""; position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 0 3px #fff; opacity: 0; transition: opacity 120ms; }
+  body.paused #stage::after { opacity: 1; }
   .taphint { animation: fade-in 200ms ease-out; }
   .notice { position: fixed; z-index: 4; left: var(--sl); right: var(--sr); bottom: calc(var(--panel-h, 140px) + 14px); padding: 12px 14px; border-radius: var(--r-s); font: 500 15px/1.35 var(--font); }
 
   /* ---- tag strip along the bottom ---- */
   .bottom {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 2;
-    background: var(--raised);
+    background: var(--bg); border-top: 1px solid var(--hair);
     padding: 10px var(--sr) calc(env(safe-area-inset-bottom, 0px) + 12px) var(--sl);
     display: grid; gap: 8px;
   }
@@ -63,14 +69,14 @@
   .list .hint { color: var(--muted); font-size: 15px; }
   .card {
     flex: none; display: flex; align-items: center; gap: 10px; padding: 6px 12px 6px 6px;
-    border: 1.5px solid var(--line); border-radius: var(--r-s); background: var(--bg);
+    border: 1px solid var(--line); border-radius: var(--r-s); background: var(--bg);
   }
   /* In view: the card inverts. */
   .card.live { background: var(--fg); color: var(--bg); border-color: var(--fg); }
   .card .mini { width: 40px; height: 40px; flex: none; }
   .card .mini svg { width: 100%; height: 100%; display: block; shape-rendering: crispEdges; }
   .card .meta { display: grid; line-height: 1.1; font-variant-numeric: tabular-nums; }
-  .card b { display: flex; align-items: center; gap: 6px; font: 700 20px var(--font); }
+  .card b { display: flex; align-items: center; gap: 6px; font: 600 20px var(--font); letter-spacing: -0.01em; }
   .card .sw { width: 8px; height: 8px; border-radius: 2px; background: var(--c); }
   .card small { font: 500 12px var(--font); opacity: 0.65; }
 
@@ -78,7 +84,7 @@
   .scrim { position: fixed; inset: 0; z-index: 5; background: rgba(0,0,0,0.5); }
   .settings {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 6; max-height: 86%; overflow-y: auto; overscroll-behavior: contain;
-    background: var(--raised); border-radius: var(--r-m) var(--r-m) 0 0;
+    background: var(--bg); border-top: 1px solid var(--hair); border-radius: var(--r-m) var(--r-m) 0 0;
     padding: 16px var(--sr) calc(env(safe-area-inset-bottom, 0px) + 20px) var(--sl);
     display: grid; gap: 20px;
   }
@@ -86,11 +92,9 @@
   .scrim:not([hidden]) { animation: fade-in 200ms ease-out; }
   .settings header { display: flex; align-items: center; gap: 12px; }
   .settings h2 { flex: 1; }
-  .settings .opts button { background: var(--raised); }
-  .settings .opts button[aria-pressed="true"] { background: var(--fg); }
   .group { display: grid; gap: 10px; }
   .dictname { margin-top: -12px; color: var(--muted); font: 500 13px var(--font); font-variant-numeric: tabular-nums; }
-  .more { display: grid; gap: 20px; border-top: 1px solid var(--line); padding-top: 12px; }
+  .more { display: grid; gap: 20px; border-top: 1px solid var(--hair); padding-top: 12px; }
   .more summary { cursor: pointer; font: 600 15px var(--font); color: var(--muted); list-style: none; display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
   .more summary::-webkit-details-marker { display: none; }
   .more summary::after { content: "+"; font: 400 24px/1 var(--font); }
@@ -107,7 +111,7 @@
   }
   .gate .inner { width: 100%; max-width: 420px; margin: 0 auto; flex: 1; display: flex; flex-direction: column; gap: 18px; }
   .hero { margin: auto 0 0; display: grid; gap: 18px; justify-items: center; }
-  .gate h1 { font: 700 30px/1.15 var(--font); text-align: center; }
+  .gate h1 { font: 600 28px/1.15 var(--font); letter-spacing: -0.025em; text-align: center; }
   .gate .actions { margin-top: auto; display: grid; gap: 10px; }
   .gate .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .gate .quiet { justify-self: center; color: var(--muted); font: 500 14px var(--font); padding: 8px; text-decoration: none; }
@@ -147,7 +151,7 @@
 </div>
 <div class="stat" id="stat" hidden></div>
 <div class="pill zoomhint glass" id="zoomHint" aria-live="polite"></div>
-<div class="pill frozen glass" id="frozen" hidden role="status">Paused. Tap to resume.</div>
+<div class="pill frozen glass" id="frozen" hidden role="status"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 2v8M8.5 2v8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>Paused</div>
 <div class="pill taphint glass" id="tapHint" hidden>Tap to pause</div>
 <div class="notice glass" id="notice" hidden role="alert"></div>
 
@@ -169,32 +173,32 @@
   </div>
   <div class="group" id="sizeGroup">
     <h3>IDs in the set</h3>
-    <div class="opts" id="size"></div>
+    <div class="opts seg" id="size"></div>
   </div>
   <p class="dictname" id="dictName"></p>
   <div class="group">
     <h3>Scan size</h3>
-    <div class="opts" id="speedOpts"></div>
+    <div class="opts seg" id="speedOpts"></div>
   </div>
   <details class="more">
     <summary>More settings</summary>
     <div class="group">
       <h3>Camera</h3>
-      <div class="opts" id="camOpts"></div>
+      <div class="opts seg" id="camOpts"></div>
       <div id="lensGroup" hidden><div class="opts" id="lensOpts"></div></div>
-      <p id="camNow"></p>
+      <p id="camNow" class="caption"></p>
     </div>
     <div class="group">
       <h3>Range</h3>
-      <div class="opts" id="areaOpts"></div>
+      <div class="opts seg" id="areaOpts"></div>
     </div>
     <div class="group">
       <h3>Error correction</h3>
-      <div class="opts" id="correctOpts"></div>
+      <div class="opts seg" id="correctOpts"></div>
     </div>
     <div class="group">
       <h3>Speed readout</h3>
-      <div class="opts" id="statOpts"></div>
+      <div class="opts seg" id="statOpts"></div>
     </div>
   </details>
   <div class="links">
@@ -241,7 +245,7 @@
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="markers.js?v=23"></script>
-<script src="app.js?v=23"></script>
+<script src="markers.js?v=24"></script>
+<script src="app.js?v=24"></script>
 </body>
 </html>

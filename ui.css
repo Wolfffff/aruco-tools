@@ -1,18 +1,27 @@
-/* ArUco Tools: shared tokens and components. Dark, plain system type, minimal chrome.
-   Selection is shown by inversion (white on black flips to black on white). Markers are
-   always drawn in real black and white, whatever the theme. */
+/* ArUco Tools: shared tokens and components. True black, white type in Geist, hairline
+   separators instead of grey panels. Selection is shown by inversion (white on black flips
+   to black on white). Markers are always drawn in real black and white. */
+
+@font-face {
+  font-family: 'Geist';
+  src: url('fonts/geist-latin.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
 
 :root {
   --bg: #000;
-  --raised: #1c1c1e;   /* sheets and strips over the camera */
+  --raised: #000;      /* surfaces stay true black; hairlines separate them */
+  --hair: #262626;     /* separators */
   --fg: #fff;
-  --muted: #9a9a9f;    /* secondary text, 7:1 on black */
-  --line: #3a3a3c;     /* borders of unselected controls */
+  --muted: #8e8e93;    /* secondary text, 6.8:1 on black */
+  --line: #333;        /* borders of unselected controls */
   --alert: #ff6b6b;
-  --glass: rgba(0, 0, 0, 0.5);
-  --r-s: 8px;
-  --r-m: 14px;
-  --font: -apple-system, system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  --glass: rgba(0, 0, 0, 0.55);
+  --r-s: 10px;
+  --r-m: 18px;
+  --font: 'Geist', -apple-system, system-ui, 'Segoe UI', Roboto, sans-serif;
   --sl: max(16px, env(safe-area-inset-left, 0px));
   --sr: max(16px, env(safe-area-inset-right, 0px));
   color-scheme: dark;
@@ -21,12 +30,12 @@
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html { -webkit-text-size-adjust: 100%; }
-body { margin: 0; background: var(--bg); color: var(--fg); font: 400 16px/1.4 var(--font); -webkit-tap-highlight-color: transparent; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 400 16px/1.4 var(--font); -webkit-tap-highlight-color: transparent; -webkit-font-smoothing: antialiased; }
 :focus-visible { outline: 2px solid var(--fg); outline-offset: 3px; }
 
 h1, h2, h3 { margin: 0; text-wrap: balance; }
-h2 { font: 700 22px/1.2 var(--font); }
-h3 { font: 600 15px/1.3 var(--font); color: var(--muted); }
+h2 { font: 600 21px/1.2 var(--font); letter-spacing: -0.015em; }
+h3 { font: 500 13px/1.3 var(--font); color: var(--muted); letter-spacing: 0.01em; }
 p { margin: 0; color: var(--muted); font-size: 14px; }
 a { color: inherit; }
 
@@ -55,6 +64,12 @@ a { color: inherit; }
 }
 .opts button:active { transform: scale(0.97); }
 .opts button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+
+/* Segmented control: one of a few, joined in a single track. */
+.opts.seg { display: inline-flex; flex-wrap: nowrap; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: var(--r-s); max-width: 100%; overflow-x: auto; scrollbar-width: none; }
+.opts.seg::-webkit-scrollbar { display: none; }
+.opts.seg button { flex: 1 0 auto; height: 34px; padding: 0 14px; border: 0; border-radius: calc(var(--r-s) - 3px); color: var(--muted); }
+.opts.seg button[aria-pressed="true"] { color: var(--bg); }
 
 select, input {
   height: 44px; padding: 0 12px; border: 1.5px solid var(--line); border-radius: var(--r-s);
