@@ -1,17 +1,6 @@
 // Detection runs here so the camera preview never stutters.
-importScripts('vendor/cv.js', 'vendor/aruco.js');
+importScripts('vendor/cv.js', 'vendor/aruco.js', 'markers.js');
 
-const DICT_FILES = {
-  ARUCO_4X4_1000: 'aruco_4x4_1000',
-  ARUCO_5X5_1000: 'aruco_5x5_1000',
-  ARUCO_6X6_1000: 'aruco_6x6_1000',
-  ARUCO_7X7_1000: 'aruco_7x7_1000',
-  ARUCO_DEFAULT_OPENCV: 'aruco_default_opencv',
-  ARUCO_MIP_36h12: 'aruco_mip_36h12',
-  APRILTAG_36h11: 'apriltag_36h11',
-  APRILTAG_25h9: 'apriltag_25h9',
-  APRILTAG_16h5: 'apriltag_16h5',
-};
 
 // Threshold settings tried in turn while nothing is found: small windows for small/far
 // tags, larger windows and lower contrast for big tags and dim scenes.
@@ -72,7 +61,12 @@ function minDistance(codeList, n) {
 function getDetector(key) {
   if (detectors[key]) return detectors[key];
   const [base, countStr] = key.split(':');
-  if (!AR.DICTIONARIES[base]) importScripts('vendor/dictionaries/' + DICT_FILES[base] + '.js');
+  try {
+    loadDictionary(base);
+  } catch (err) {
+    err.loadError = true; // offline and never downloaded: the page says so
+    throw err;
+  }
   const src = AR.DICTIONARIES[base];
   if (!AR.DICTIONARIES[key]) {
     const count = countStr ? +countStr : src.codeList.length;
@@ -425,6 +419,7 @@ onmessage = (e) => {
   const timings = profile ? {} : null;
   let markers = [];
   let error = null;
+  let loadError = false;
   try {
     const rgba = bitmap ? pixelsFromBitmap(bitmap, crop, width, height) : new Uint8ClampedArray(buffer);
     if (timings) timings.readout = performance.now() - t0;
@@ -443,8 +438,8 @@ onmessage = (e) => {
     }));
   } catch (err) {
     error = String(err);
+    if (err && err.loadError) loadError = true;
   }
-  const msg = { markers, ms: performance.now() - t0, error, seq, timings };
-  // Hand a pixel buffer back so the page can reuse it.
-  if (buffer) { msg.buffer = buffer; postMessage(msg, [buffer]); } else postMessage(msg);
+  const msg = { markers, ms: performance.now() - t0, error, loadError, seq, timings };
+  postMessage(msg);
 };

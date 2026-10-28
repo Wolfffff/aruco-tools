@@ -8,33 +8,8 @@ const octx = overlay.getContext('2d', { alpha: false });
 const grab = document.createElement('canvas');
 const gctx = grab.getContext('2d', { willReadFrequently: true });
 
-/* ---------- marker sets ---------- */
+/* ---------- settings values ---------- */
 
-// OpenCV's DICT_NxN_50/100/250 are the first codes of DICT_NxN_1000; smaller sets
-// leave more room between codes, so fewer random patterns can match one.
-// `key` is stored in localStorage (and read by the sheet generator); `label` is what people see.
-const FAMILIES = [
-  { key: '4x4', label: '4×4', base: 'ARUCO_4X4_1000', name: 'DICT_4X4', sizes: [50, 100, 250, 1000] },
-  { key: '5x5', label: '5×5', base: 'ARUCO_5X5_1000', name: 'DICT_5X5', sizes: [50, 100, 250, 1000] },
-  { key: '6x6', label: '6×6', base: 'ARUCO_6X6_1000', name: 'DICT_6X6', sizes: [50, 100, 250, 1000] },
-  { key: '7x7', label: '7×7', base: 'ARUCO_7X7_1000', name: 'DICT_7X7', sizes: [50, 100, 250, 1000] },
-  { key: 'Original', label: 'ArUco original', base: 'ARUCO_DEFAULT_OPENCV', name: 'DICT_ARUCO_ORIGINAL' },
-  { key: 'MIP 36h12', label: 'ArUco MIP', base: 'ARUCO_MIP_36h12', name: 'DICT_ARUCO_MIP_36h12' },
-  { key: 'April 16h5', label: 'AprilTag 16h5', base: 'APRILTAG_16h5', name: 'DICT_APRILTAG_16h5' },
-  { key: 'April 25h9', label: 'AprilTag 25h9', base: 'APRILTAG_25h9', name: 'DICT_APRILTAG_25h9' },
-  { key: 'April 36h11', label: 'AprilTag 36h11', base: 'APRILTAG_36h11', name: 'DICT_APRILTAG_36h11' },
-];
-const DICT_FILES = {
-  ARUCO_4X4_1000: 'aruco_4x4_1000',
-  ARUCO_5X5_1000: 'aruco_5x5_1000',
-  ARUCO_6X6_1000: 'aruco_6x6_1000',
-  ARUCO_7X7_1000: 'aruco_7x7_1000',
-  ARUCO_DEFAULT_OPENCV: 'aruco_default_opencv',
-  ARUCO_MIP_36h12: 'aruco_mip_36h12',
-  APRILTAG_36h11: 'apriltag_36h11',
-  APRILTAG_25h9: 'apriltag_25h9',
-  APRILTAG_16h5: 'apriltag_16h5',
-};
 // Pixel budget per detection pass: the longest side of the frame handed to the detector.
 // The 2x center pass gets the same budget, so with a 4K camera it reads native pixels.
 // 0 = native: every camera pixel, no downscaling.
@@ -47,9 +22,12 @@ const AREA_OPTIONS = [['auto', 'Auto'], ['full', 'Whole frame'], ['center', 'Far
 // all one-frame misreads of textures and text.
 const CONFIRM_HITS = 2;
 // A confirmed tag a pass misses (usually motion blur) stays, moving with the camera, and
-// fades out over a few passes. In auto mode a tag may only be visible to every other pass
-// (whole frame vs center), so it gets one more.
+// fades out over a few passes. Not every pass looks everywhere (focus scans cover only
+// tracked tags; in auto mode whole-frame and centre passes alternate), so auto gets one more.
 const holdPasses = () => (state.area === 'auto' ? 4 : 3);
+// Tags missed for at most this many passes are still looked for: in focus scans and in the
+// worker's re-check of expected spots.
+const RECHECK_PASSES = 2;
 
 // Fully visible while being read; fades out over the hold when missed, in over two passes
 // when first confirmed.
@@ -115,27 +93,43 @@ function edges(p, from, to) {
   return o;
 }
 
-// Shift s (sub-sample) with cur[i + s] ≈ prev[i], or null when the slice has too little
-// texture or the best match is not clearly better than the rest.
-function matchShift(prev, cur, range) {
+// Shift s in [lo, hi] (sub-sample) with cur[base + i + s] ≈ prev[i], or null when the slice
+// has too little texture, the best match sits at the edge of the window, or it is not
+// clearly better than the rest. `cur` may be longer than `prev` (a whole band), so a slice
+// keeps its full overlap even when the picture moved a lot.
+function matchShift(prev, cur, lo, hi, base = 0) {
   const n = prev.length;
   let energy = 0;
   for (let i = 0; i < n; i++) energy += Math.abs(prev[i]);
   if (energy / n < 2) return null; // flat: a wall, the sky
-  let best = 0, bestCost = Infinity, sum = 0;
-  const costs = new Float32Array(2 * range + 1);
-  for (let s = -range; s <= range; s++) {
+  let best = 0, bestCost = Infinity, sum = 0, count = 0;
+  const costs = new Float32Array(hi - lo + 1);
+  for (let s = lo; s <= hi; s++) {
     let c = 0, k = 0;
-    for (let i = Math.max(0, -s); i < Math.min(n, n - s); i++, k++) c += Math.abs(prev[i] - cur[i + s]);
-    c /= Math.max(1, k);
-    costs[s + range] = c; sum += c;
+    const from = Math.max(0, -(base + s)), to = Math.min(n, cur.length - (base + s));
+    for (let i = from; i < to; i++, k++) c += Math.abs(prev[i] - cur[base + i + s]);
+    if (k < n / 3) { costs[s - lo] = Infinity; continue; } // too little overlap to judge
+    c /= k;
+    costs[s - lo] = c; sum += c; count++;
     if (c < bestCost) { bestCost = c; best = s; }
   }
-  if (best === -range || best === range) return null; // at the edge of the search
-  if (bestCost > 0.8 * (sum / costs.length)) return null; // no distinct match
-  const l = costs[best + range - 1], m = costs[best + range], r = costs[best + range + 1];
+  if (bestCost === Infinity || best === lo || best === hi) return null;
+  if (bestCost > 0.8 * (sum / count)) return null; // no distinct match
+  const l = costs[best - lo - 1], m = costs[best - lo], r = costs[best - lo + 1];
   const den = l - 2 * m + r;
-  return best + (den > 0 ? (0.5 * (l - r)) / den : 0);
+  return best + (Number.isFinite(den) && den > 0 ? (0.5 * (l - r)) / den : 0);
+}
+
+// Pairs of samples summed: a half-resolution profile for the coarse search.
+function halve(p) {
+  const o = new Float32Array(p.length >> 1);
+  for (let i = 0; i < o.length; i++) o[i] = p[2 * i] + p[2 * i + 1];
+  return o;
+}
+function sumBands(bands) {
+  const out = new Float32Array(bands[0].length);
+  for (const b of bands) for (let i = 0; i < b.length; i++) out[i] += b[i];
+  return out;
 }
 
 // Least-squares similarity from point pairs (centre-relative), optionally dropping outliers.
@@ -155,14 +149,24 @@ function fitSimilarity(src, dst) {
 
 const apply = (M, p) => [M.a * p[0] - M.b * p[1] + M.tx, M.b * p[0] + M.a * p[1] + M.ty];
 
+// Coarse to fine. First the whole picture's slide, from half-resolution profiles over a
+// wide window, so a fast pan or a late frame (the picture moved a lot since the last one)
+// is still caught. Then each grid cell refines around it, which reveals zoom and twist.
+const COARSE_RANGE = 24; // half-resolution samples: ±48 motion px, about ±320 camera px
+const FINE_WINDOW = 8;   // motion px around the coarse slide, per cell
 function frameDelta(prev, cur, w, h) {
+  const pc = halve(sumBands(prev.cols)), cc = halve(sumBands(cur.cols));
+  const pr = halve(sumBands(prev.rows)), cr = halve(sumBands(cur.rows));
+  const gx0 = matchShift(edges(pc, 0, pc.length), edges(cc, 0, cc.length), -COARSE_RANGE, COARSE_RANGE);
+  const gy0 = matchShift(edges(pr, 0, pr.length), edges(cr, 0, cr.length), -COARSE_RANGE, COARSE_RANGE);
+  const cx = gx0 === null ? 0 : Math.round(gx0 * 2), cy = gy0 === null ? 0 : Math.round(gy0 * 2);
   const src = [], dst = [];
   for (let gy = 0; gy < GRID; gy++) {
     for (let gx = 0; gx < GRID; gx++) {
       const x0 = Math.round((gx * w) / GRID), x1 = Math.round(((gx + 1) * w) / GRID);
       const y0 = Math.round((gy * h) / GRID), y1 = Math.round(((gy + 1) * h) / GRID);
-      const dx = matchShift(edges(prev.cols[gy], x0, x1), edges(cur.cols[gy], x0, x1), 8);
-      const dy = matchShift(edges(prev.rows[gx], y0, y1), edges(cur.rows[gx], y0, y1), 10);
+      const dx = matchShift(edges(prev.cols[gy], x0, x1), edges(cur.cols[gy], 0, w), cx - FINE_WINDOW, cx + FINE_WINDOW, x0);
+      const dy = matchShift(edges(prev.rows[gx], y0, y1), edges(cur.rows[gx], 0, h), cy - FINE_WINDOW, cy + FINE_WINDOW, y0);
       if (dx === null || dy === null) continue;
       const c = [(x0 + x1) / 2 - w / 2, (y0 + y1) / 2 - h / 2];
       src.push(c); dst.push([c[0] + dx, c[1] + dy]);
@@ -214,7 +218,7 @@ const store = {
 };
 
 const state = {
-  family: FAMILIES.find((f) => f.key === store.get('family')) || FAMILIES[0],
+  family: MARKER_FAMILIES.find((f) => f.key === store.get('family')) || MARKER_FAMILIES[0],
   size: +(store.get('size') || 50),
   res: SPEED_OPTIONS.some(([v]) => String(v) === store.get('speed')) ? +store.get('speed') : 960,
   cam: store.get('cam') === '4k' ? '4k' : '1080',
@@ -229,7 +233,6 @@ const state = {
   flip: false, // in auto mode, alternates whole-frame and center passes
   paused: false,
   switching: false, // camera restarting: keep the last frame on screen
-  pending: false,
   loopsStarted: false,
   track: null,
   zoom: null, // { hw, min, max, step, value }: hw = the camera's own zoom, else digital
@@ -242,8 +245,8 @@ const state = {
 };
 if (state.family.sizes && !state.family.sizes.includes(state.size)) state.size = state.family.sizes[0];
 
-const setKey = (f = state.family, size = state.size) => (f.sizes ? `${f.base}:${size}` : f.base);
-const setLabel = (f = state.family, size = state.size) => (f.sizes ? `${f.name}_${size}` : f.name);
+const setKey = (f = state.family, size = state.size) => setKeyOf(f, size);
+const setLabel = (f = state.family, size = state.size) => setNameOf(f, size);
 
 // Same ID always gets the same colour, so you can follow a tag across frames.
 const hue = (id) => (id * 137.508 + 200) % 360;
@@ -251,53 +254,78 @@ const color = (id, a = 1) => `hsl(${hue(id)} 100% 62% / ${a})`;
 
 /* ---------- camera ---------- */
 
+// Each start gets a generation number. A newer start (another switch, the app coming back
+// to the foreground) makes an older one stop at its next step and release its stream.
+let cameraGen = 0;
+const SUPERSEDED = Symbol('superseded');
+
 async function startCamera() {
+  const gen = ++cameraGen;
+  const check = () => { if (gen !== cameraGen) throw SUPERSEDED; };
   $('err').hidden = true;
   if (!navigator.mediaDevices?.getUserMedia) {
-    return showError('No camera access on this page. Open it over https in Safari or Chrome.');
+    return showError('This browser cannot use the camera here. Open the page over https in Safari or Chrome.');
   }
   const btn = $('start');
   btn.disabled = true;
   btn.textContent = 'Starting camera…';
+  let stream = null;
   try {
-    let stream = await openStream(lensId());
+    stream = await openStream(lensId());
+    check();
     // iPhones hand Safari a combined camera that hops between lenses as it focuses, which
     // shows as a sudden zoom. Switch to the plain wide lens (behind the start screen).
     const steady = state.lens === 'auto' ? await pickSteadyLens(stream) : null;
+    check();
     if (steady) {
       stream.getTracks().forEach((t) => t.stop());
       stream = await openStream(steady);
+      check();
     }
+    const track = stream.getVideoTracks()[0];
     video.srcObject = stream;
-    state.track = stream.getVideoTracks()[0];
+    state.track = track;
     setupTrackControls();
     await video.play();
-    // iOS can paint the first frames before the video knows its real size, which shows
-    // as a small picture that then jumps to full screen. Reveal only a real frame.
+    // Wait for a real frame of the final size, behind the start screen, so the picture
+    // never appears small or switches resolution after it shows.
     await firstFrame();
-    // Settle on the final stream size while the start screen still covers everything,
-    // so the picture never visibly switches resolution after it appears.
-    if (await upgradeResolution(state.track)) await firstFrame();
+    check();
+    if (await upgradeResolution(track)) await firstFrame();
+    check();
     btn.disabled = false;
     btn.textContent = 'Open camera';
     if (!$('settings').hidden) renderSettings(); // shows the new stream size after a switch
-    // Reveal on the first analyzed frame, so every picture on screen comes from the same
-    // snapshot pipeline (a raw video frame can be cropped slightly differently on iOS).
+    // Reveal on the first analyzed frame.
     startLoops();
     await firstShown();
+    check();
     state.revealed = true;
-    logEvent(`shown · ${video.videoWidth}×${video.videoHeight} · ${state.track.label || 'camera'}`);
+    logEvent(`shown · ${video.videoWidth}×${video.videoHeight} · ${track.label || 'camera'}`);
     $('gate').hidden = true;
     $('top').hidden = false;
     $('bottom').hidden = false;
     $('stat').hidden = !state.showStats;
     requestWakeLock();
   } catch (e) {
+    // Release the camera whatever went wrong; an unreleased stream keeps the camera light
+    // on and can make the next attempt fail.
+    if (stream && stream !== video.srcObject) stream.getTracks().forEach((t) => t.stop());
+    if (e === SUPERSEDED) return;
+    stream?.getTracks().forEach((t) => t.stop());
+    video.srcObject = null;
+    state.track = null;
     btn.disabled = false;
     btn.textContent = 'Open camera';
+    // If the camera was already showing (a lens or 4K switch), bring the start screen back
+    // so the message and the button are visible.
+    state.revealed = false;
+    $('gate').hidden = false;
+    $('top').hidden = true;
+    $('bottom').hidden = true;
     showError(e.name === 'NotAllowedError'
-      ? 'Camera access was denied. Allow it for this site in your browser settings and reload.'
-      : 'Could not open the camera: ' + (e.message || e.name));
+      ? 'Camera access is off for this site. Allow it in the browser settings, then tap Open camera.'
+      : `The camera did not start (${e.message || e.name}). Tap Open camera to try again.`);
   }
 }
 
@@ -379,6 +407,7 @@ async function upgradeResolution(track) {
     await track.applyConstraints({ ...bestAsk, frameRate: { ideal: 30 } }).catch(() => {});
   }
   state.tracks = []; // positions may now be in a different stream size
+  dropInFlight();
   return Boolean(bestAsk);
 }
 
@@ -419,6 +448,7 @@ function setupTrackControls() {
   // iPhones an extra request can make the camera reconfigure (a visible jump).
   const caps = state.track.getCapabilities?.() || {};
   $('torch').hidden = !caps.torch;
+  $('torch').setAttribute('aria-pressed', 'false'); // a new stream starts with the light off
   // Use the camera's own zoom where the browser exposes it; otherwise zoom digitally.
   const hw = caps.zoom && caps.zoom.max > caps.zoom.min;
   state.zoom = hw
@@ -467,7 +497,9 @@ $('stage').addEventListener('touchmove', (e) => {
   e.preventDefault();
   setZoom(pinch.z * touchGap(e.touches) / pinch.d);
 }, { passive: false });
-$('stage').addEventListener('touchend', (e) => { if (e.touches.length < 2) pinch = null; });
+const endPinch = (e) => { if (e.touches.length < 2) pinch = null; };
+$('stage').addEventListener('touchend', endPinch);
+$('stage').addEventListener('touchcancel', endPinch);
 
 // Keep the zoom label just above the bottom panel, whatever its height.
 new ResizeObserver(([entry]) => {
@@ -491,15 +523,17 @@ document.addEventListener('visibilitychange', () => {
 });
 
 async function restartCamera() {
-  // Hold the last analyzed frame on screen until the new stream has settled.
+  // Hold the last frame on screen until the new stream has settled.
   state.switching = true;
+  dropInFlight();
   state.track?.stop();
   state.track = null;
   state.tracks = []; // positions are in the old stream's pixels
+  const gen = cameraGen + 1; // the generation startCamera is about to take
   try {
     await startCamera();
   } finally {
-    state.switching = false;
+    if (gen === cameraGen) state.switching = false; // a newer restart owns the flag now
   }
 }
 
@@ -510,12 +544,24 @@ async function restartCamera() {
 // default (Safari under-reports cores on purpose; an iPhone has six), four where eight or
 // more are reported, one where only one is.
 const cores = navigator.hardwareConcurrency || 4;
-const workers = Array.from({ length: cores <= 1 ? 1 : cores >= 8 ? 4 : 3 }, () => {
+function makeWorker() {
   const w = new Worker('worker.js' + BUILD);
   w.busy = false;
   w.onmessage = (e) => onWorkerMessage(w, e.data);
+  // A worker that fails to load or crashes (out of memory at 4K) is replaced, so its
+  // `busy` flag can never stay stuck and take a share of the frames with it.
+  w.onerror = (e) => { e.preventDefault?.(); replaceWorker(w); };
   return w;
-});
+}
+function replaceWorker(w) {
+  const i = workers.indexOf(w);
+  if (i < 0) return;
+  w.terminate();
+  workers[i] = makeWorker();
+  workers[i].postMessage({ warm: setKey() });
+}
+const STUCK_MS = 3000; // a frame takes tens of milliseconds; this long means the worker is gone
+const workers = Array.from({ length: cores <= 1 ? 1 : cores >= 8 ? 4 : 3 }, makeWorker);
 
 // Where supported, the page takes a GPU snapshot of the frame (createImageBitmap), paints
 // the screen from it, and hands it to a worker, which scales it and reads the pixels.
@@ -531,9 +577,18 @@ let shownSeq = 0;
 const frameRef = new Map(); // seq -> picture shift when that frame was sent for reading
 
 // The part of the video frame being scanned, in video pixels.
+// The part of the video frame that is on screen (the picture fills the screen and its
+// overflow is cropped, then any digital zoom), or the middle half of it for the center
+// pass. Scanning only this spends no time on pixels nobody can see.
 function scanRect(vw, vh, center) {
-  const f = (center ? 0.5 : 1) / digitalZoom(); // what is on screen, or the middle half of it
-  const w = Math.round(vw * f), h = Math.round(vh * f);
+  const { cw, ch } = screenSize();
+  const f = center ? 0.5 : 1;
+  if (!cw || !ch) { // no screen size yet: the whole frame
+    const w = Math.round(vw * f), h = Math.round(vh * f);
+    return { x: (vw - w) >> 1, y: (vh - h) >> 1, w, h };
+  }
+  const cover = Math.max(cw / vw, ch / vh) * digitalZoom();
+  const w = Math.min(vw, Math.round((cw / cover) * f)), h = Math.min(vh, Math.round((ch / cover) * f));
   return { x: (vw - w) >> 1, y: (vh - h) >> 1, w, h };
 }
 
@@ -544,7 +599,7 @@ function scanRect(vw, vh, center) {
 function focusRect(vw, vh) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, side = 0;
   for (const t of state.tracks) {
-    if (t.hits < CONFIRM_HITS || state.passNo - t.pass > 2) continue;
+    if (t.hits < CONFIRM_HITS || state.passNo - t.pass > RECHECK_PASSES) continue;
     const q = shifted(t);
     side = Math.max(side, sideLen(q));
     for (const p of q) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
@@ -584,6 +639,8 @@ function noteLatency(ms) {
 // `src` is this frame: an ImageBitmap (handed to the worker, or closed) or the video itself.
 function sendFrame(src, vw, vh) {
   const isBitmap = src !== video;
+  const now = performance.now();
+  for (const w of workers) if (w.busy && now - w.busySince > STUCK_MS) replaceWorker(w);
   const worker = workers.find((w) => !w.busy);
   if (!worker) { if (isBitmap) src.close(); return; } // all busy: skip; the next frame is moments away
   const { r, cropped } = chooseRegion(vw, vh);
@@ -599,13 +656,14 @@ function sendFrame(src, vw, vh) {
   // can re-check those spots if its full scan misses them.
   const expect = [];
   for (const t of state.tracks) {
-    if (t.hits < CONFIRM_HITS || state.passNo - t.pass > 2) continue;
+    if (t.hits < CONFIRM_HITS || state.passNo - t.pass > RECHECK_PASSES) continue;
     const c = shifted(t).map((p) => [(p[0] - r.x) * scale, (p[1] - r.y) * scale]);
     const [mx, my] = centroid(c);
     if (mx >= 0 && my >= 0 && mx < w && my < h) expect.push({ id: t.id, corners: c });
   }
   const msg = { width: w, height: h, dict: setKey(), roi: { x: r.x, y: r.y, scale }, correct: state.correct, seq, expect };
   worker.busy = true;
+  worker.busySince = now;
   if (isBitmap) {
     worker.postMessage({ ...msg, bitmap: src, crop: r }, [src]);
     return;
@@ -619,6 +677,7 @@ function sendFrame(src, vw, vh) {
 function onWorkerMessage(worker, data) {
   if (data.warm) return;
   worker.busy = false;
+  if (data.loadError) { notify("This marker set isn't on the phone yet. Connect once to download it."); return; }
   if (data.probe) {
     bitmapPath = data.offscreen;
     return;
@@ -631,6 +690,21 @@ function onWorkerMessage(worker, data) {
   shownSeq = seq;
   if (error) console.error(error);
   else onResult(markers, ms, ref);
+}
+
+// Results still being computed belong to the old state after a reset; ignore them.
+function dropInFlight() {
+  shownSeq = frameSeq;
+  frameRef.clear();
+}
+
+// A short message over the camera.
+let noticeTimer = 0;
+function notify(text) {
+  $('notice').textContent = text;
+  $('notice').hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => ($('notice').hidden = true), 3500);
 }
 
 function onResult(markers, ms, ref) {
@@ -685,15 +759,20 @@ function markSeen(id) {
 // picture on screen and detection can never disagree about which frame they saw. Then
 // measure how the picture moved, paint it with the outlines moved to match, and hand it
 // to a free worker if there is one.
-let snapshotting = false;
+let snapshotting = 0; // when the pending snapshot was requested, or 0
+let snapshotFailures = 0;
 function onVideoFrame() {
-  if (state.paused || state.switching || snapshotting) return;
+  if (state.paused || state.switching) return;
+  // A snapshot normally takes well under a millisecond; one that never returns must not
+  // stop painting and detection for good.
+  if (snapshotting && performance.now() - snapshotting < 500) return;
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || video.readyState < 2) return;
   if (!bitmapPath) { processFrame(video, vw, vh); return; }
-  snapshotting = true;
+  const asked = (snapshotting = performance.now());
   createImageBitmap(video).then((bitmap) => {
-    snapshotting = false;
+    if (snapshotting === asked) snapshotting = 0;
+    snapshotFailures = 0;
     if (bitmap.width !== vw || bitmap.height !== vh) {
       // Some browsers snapshot the raw, unrotated sensor frame; that would be sideways.
       // Use the video directly on this phone from now on.
@@ -704,8 +783,8 @@ function onVideoFrame() {
     if (state.paused || state.switching) { bitmap.close(); return; }
     processFrame(bitmap, vw, vh);
   }, () => {
-    snapshotting = false;
-    bitmapPath = false; // snapshots unavailable (rare): use the video directly
+    if (snapshotting === asked) snapshotting = 0;
+    if (++snapshotFailures >= 3) bitmapPath = false; // snapshots unavailable: use the video
   });
 }
 
@@ -761,7 +840,7 @@ function draw(src) {
   // from the old shape rather than drawing them in the wrong place.
   const size = vw + 'x' + vh;
   if (size !== lastVideoSize) {
-    if (lastVideoSize) { state.tracks = []; if (state.revealed && vw) logEvent(`camera size ${size}`); }
+    if (lastVideoSize) { state.tracks = []; dropInFlight(); if (state.revealed && vw) logEvent(`camera size ${size}`); }
     lastVideoSize = size;
   }
   if (overlay.width !== cw || overlay.height !== ch) {
@@ -806,7 +885,6 @@ function brackets(q, len) {
   octx.stroke();
 }
 
-const quadSide = (q) => (Math.hypot(q[1][0] - q[0][0], q[1][1] - q[0][1]) + Math.hypot(q[2][0] - q[1][0], q[2][1] - q[1][1])) / 2;
 
 function drawBox(id, q, alpha, dpr) {
   octx.globalAlpha = alpha;
@@ -832,12 +910,12 @@ function drawBox(id, q, alpha, dpr) {
 // the highest). Size steps in 2 px increments so it does not jitter with the tag.
 function drawLabel(id, q, alpha, dpr) {
   const step = 2 * dpr;
-  const fs = Math.max(12 * dpr, Math.min(20 * dpr, Math.round((quadSide(q) * 0.2) / step) * step));
+  const fs = Math.max(12 * dpr, Math.min(20 * dpr, Math.round((sideLen(q) * 0.2) / step) * step));
   octx.globalAlpha = alpha;
-  octx.font = `700 ${fs}px -apple-system, system-ui, Roboto, sans-serif`;
+  octx.font = `800 ${fs}px Archivo, -apple-system, system-ui, sans-serif`;
   const label = String(id);
   const tw = octx.measureText(label).width;
-  const lx = (q[0][0] + q[1][0] + q[2][0] + q[3][0]) / 4;
+  const lx = centroid(q)[0];
   const top = Math.min(q[0][1], q[1][1], q[2][1], q[3][1]);
   const h = fs * 1.5, w = Math.max(h, tw + fs * 0.9);
   const ly = Math.max(h / 2 + 2 * dpr, top - h / 2 - 6 * dpr);
@@ -871,24 +949,17 @@ let seenAt = 0;
 let inViewKey = '';
 const lastSeenAt = new Map(); // id -> when it was last in view
 
-// Tiny drawings of tags for the list, from the same dictionary the detector uses.
-const miniCache = new Map(); // `${setKey}:${id}` -> svg markup
-let miniDict = null; // { base, dict } for the current family
-async function ensureMiniDict() {
-  const base = state.family.base;
-  if (miniDict?.base === base) return;
-  await loadDict(base);
-  const def = AR.DICTIONARIES[base];
-  const saved = def.tau;
-  def.tau = 1; // skip the library's slow distance scan; drawing does not need it
-  miniDict = { base, dict: new AR.Dictionary(base) };
-  def.tau = saved;
-  seenDirty = true;
-}
+// Tiny drawings of markers for the list, from the same dictionary the detector uses.
+// Empty until the dictionary has loaded; the list redraws then.
+const miniCache = new Map(); // `${base}:${id}` -> svg markup
 function miniSvg(id) {
-  if (!miniDict || miniDict.base !== state.family.base) return '';
-  const k = miniDict.base + ':' + id;
-  if (!miniCache.has(k)) miniCache.set(k, miniDict.dict.generateSVG(id));
+  const base = state.family.base;
+  if (!AR.DICTIONARIES[base]) {
+    loadDictionary(base).then(() => { seenDirty = true; }, () => {});
+    return '';
+  }
+  const k = base + ':' + id;
+  if (!miniCache.has(k)) miniCache.set(k, drawingDictionary(base).generateSVG(id));
   return miniCache.get(k);
 }
 
@@ -921,14 +992,13 @@ const cards = new Map();
 function renderSeen(inView = new Set()) {
   seenDirty = false;
   seenAt = performance.now();
-  ensureMiniDict();
   const list = $('seen');
   // Ordered by last seen: tags in view first (newest arrival on the left; they are all
   // "seen now", so ordering them by that would reshuffle every frame), then the rest by
   // when they were last in view, most recent first.
   const order = (id) => (inView.has(id) ? 1e12 + (state.entered.get(id) || 0) : lastSeenAt.get(id) || 0);
   const ids = [...state.seen.keys()].sort((a, b) => order(b) - order(a));
-  $('seenCount').textContent = ids.length ? `${ids.length} tag${ids.length === 1 ? '' : 's'} read` : 'No tags yet';
+  $('seenCount').textContent = ids.length ? `${ids.length} marker${ids.length === 1 ? '' : 's'}` : 'No markers yet';
   $('emptyHint').hidden = ids.length > 0;
   for (const [id, el] of cards) if (!state.seen.has(id)) { el.remove(); cards.delete(id); }
   let prev = null;
@@ -938,15 +1008,17 @@ function renderSeen(inView = new Set()) {
       el = document.createElement('div');
       el.className = 'card';
       el.style.setProperty('--c', color(id));
-      el.innerHTML = '<span class="mini"></span><span class="meta"><b></b><small></small></span>';
-      el.querySelector('b').textContent = id;
+      el.innerHTML = '<span class="mini"></span><span class="meta"><b><i class="sw"></i><span></span></b><small></small></span>';
+      el.querySelector('b span').textContent = id;
+      el.mini = el.querySelector('.mini');
+      el.count = el.querySelector('small');
       el.classList.add('new');
       el.addEventListener('animationend', () => el.classList.remove('new'), { once: true });
       cards.set(id, el);
     }
-    const mini = el.querySelector('.mini');
-    if (!mini.firstChild) mini.innerHTML = miniSvg(id);
-    el.querySelector('small').textContent = '×' + state.seen.get(id);
+    if (!el.mini.firstChild) el.mini.innerHTML = miniSvg(id);
+    const n = state.seen.get(id);
+    if (el.shownCount !== n) { el.shownCount = n; el.count.textContent = `${n} read${n === 1 ? '' : 's'}`; }
     el.classList.toggle('live', inView.has(id));
     // Keep DOM order sorted without re-inserting cards that are already in place.
     const want = prev ? prev.nextSibling : list.firstChild;
@@ -969,7 +1041,7 @@ function options(el, list, current, onPick) {
 }
 
 function renderSettings() {
-  options($('family'), FAMILIES.map((f) => [f, f.label]), state.family, (f) => {
+  options($('family'), MARKER_FAMILIES.map((f) => [f, f.label]), state.family, (f) => {
     state.family = f;
     if (f.sizes && !f.sizes.includes(state.size)) state.size = f.sizes[0];
     store.set('family', f.key);
@@ -984,20 +1056,20 @@ function renderSettings() {
   $('dictName').textContent = `OpenCV: ${setLabel()}`;
   options($('speedOpts'), SPEED_OPTIONS, state.res, (v) => { state.res = v; store.set('speed', String(v)); });
   options($('camOpts'), CAMERA_OPTIONS, state.cam, (v) => {
-    if (v === state.cam) return;
+    if (v === state.cam || state.switching) return;
     state.cam = v;
     store.set('cam', v);
     if (state.track) restartCamera();
   });
   const short = (l) => l.replace(/^back\s*/i, '').replace(/\s*camera$/i, '') || 'Wide';
   options($('lensOpts'), [['auto', 'Auto (steady)'], ...state.lenses.map((l) => [l.id, short(l.label)])], state.lens, (v) => {
-    if (v === state.lens) return;
+    if (v === state.lens || state.switching) return;
     state.lens = v;
     store.set('lens', v);
     if (state.track) restartCamera();
   });
   $('lensGroup').hidden = !state.lenses.length;
-  $('camNow').textContent = video.videoWidth ? `Streaming ${Math.max(video.videoWidth, video.videoHeight)}×${Math.min(video.videoWidth, video.videoHeight)}.` : '';
+  $('camNow').textContent = video.videoWidth ? `Now ${Math.max(video.videoWidth, video.videoHeight)}×${Math.min(video.videoWidth, video.videoHeight)}.` : '';
   options($('areaOpts'), AREA_OPTIONS, state.area, (v) => { state.area = v; store.set('area', v); });
   options($('correctOpts'), [[false, 'Off'], [true, 'On']], state.correct, (v) => {
     state.correct = v;
@@ -1018,6 +1090,7 @@ function warmWorkers() {
 
 function resetReads() {
   warmWorkers();
+  dropInFlight();
   state.tracks = [];
   state.entered.clear();
   lastSeenAt.clear();
@@ -1030,11 +1103,15 @@ function openSettings() {
   renderSettings();
   $('scrim').hidden = false;
   $('settings').hidden = false;
+  $('settingsDone').focus({ preventScroll: true });
 }
 function closeSettings() {
+  if ($('settings').hidden) return;
   $('scrim').hidden = true;
   $('settings').hidden = true;
+  $('settingsBtn').focus({ preventScroll: true });
 }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
 
 /* ---------- controls ---------- */
 
@@ -1043,14 +1120,15 @@ $('setBtn').onclick = openSettings;
 $('settingsBtn').onclick = openSettings;
 $('settingsDone').onclick = closeSettings;
 $('scrim').onclick = closeSettings;
-$('pause').onclick = (e) => {
-  state.paused = !state.paused;
-  e.currentTarget.setAttribute('aria-pressed', state.paused);
-  e.currentTarget.setAttribute('aria-label', state.paused ? 'Resume' : 'Freeze');
-  $('pauseIcon').setAttribute('d', state.paused ? 'M7 4l12 8-12 8z' : 'M8 5v14M16 5v14');
-  if (state.paused) video.pause();
+// Tap the picture to freeze it (to read IDs at leisure); tap again to resume. A pinch is
+// not a tap, so zooming never freezes.
+function setFrozen(frozen) {
+  state.paused = frozen;
+  $('frozen').hidden = !frozen;
+  if (frozen) video.pause();
   else video.play().catch(() => {});
-};
+}
+$('stage').onclick = () => { if (state.track) setFrozen(!state.paused); };
 $('torch').onclick = async (e) => {
   const btn = e.currentTarget;
   const on = btn.getAttribute('aria-pressed') !== 'true';
@@ -1061,6 +1139,8 @@ $('torch').onclick = async (e) => {
 };
 $('clear').onclick = () => {
   state.seen.clear();
+  state.entered.clear();
+  lastSeenAt.clear();
   seenDirty = true;
 };
 $('copy').onclick = async (e) => {
@@ -1072,15 +1152,15 @@ $('copy').onclick = async (e) => {
     await navigator.clipboard.writeText(text);
     btn.textContent = 'Copied';
   } catch {
-    btn.textContent = text ? 'Failed' : 'Empty';
+    btn.textContent = text ? 'Copy failed' : 'Nothing to copy';
   }
-  setTimeout(() => (btn.textContent = 'Copy'), 1400);
+  setTimeout(() => (btn.textContent = 'Copy IDs'), 1400);
 };
 
 /* ---------- marker display (to test from a second screen) ---------- */
 
 const genSet = $('genSet');
-for (const f of FAMILIES) {
+for (const f of MARKER_FAMILIES) {
   for (const n of f.sizes || [null]) {
     const o = document.createElement('option');
     o.value = n ? `${f.key}|${n}` : f.key;
@@ -1089,36 +1169,17 @@ for (const f of FAMILIES) {
   }
 }
 
-function loadDict(name) {
-  if (AR.DICTIONARIES[name]) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = 'vendor/dictionaries/' + DICT_FILES[name] + '.js';
-    s.onload = resolve;
-    s.onerror = reject;
-    document.head.append(s);
-  });
-}
-
-const genCache = {};
 async function renderMarker() {
   const [fk, n] = genSet.value.split('|');
-  const f = FAMILIES.find((x) => x.key === fk);
-  await loadDict(f.base);
-  const dict = genCache[f.base] || (genCache[f.base] = (() => {
-    const def = AR.DICTIONARIES[f.base];
-    const saved = def.tau;
-    def.tau = 1; // skip the library's slow distance scan; drawing does not need it
-    const d = new AR.Dictionary(f.base);
-    def.tau = saved;
-    return d;
-  })());
+  const f = MARKER_FAMILIES.find((x) => x.key === fk);
+  await loadDictionary(f.base);
+  const dict = drawingDictionary(f.base);
   const max = (n ? +n : dict.codeList.length) - 1;
   const id = Math.max(0, Math.min(max, parseInt($('genId').value, 10) || 0));
   $('genId').value = id;
   $('genId').max = max;
   $('markerSvg').innerHTML = dict.generateSVG(id);
-  $('markerCaption').textContent = `${setLabel(f, n ? +n : undefined)} · id ${id}`;
+  $('markerCaption').textContent = `IDs 0 to ${max}`;
 }
 
 function openSheet() {
@@ -1149,12 +1210,42 @@ warmWorkers();
   } catch {} // some browsers cannot query camera permission; the button still works
 })();
 
-// Start-screen emblem: a real DICT_4X4 marker, id 0.
-$('mark').innerHTML = Array.from({ length: 36 }, (_, i) => {
-  const x = i % 6, y = (i / 6) | 0;
-  const inner = x > 0 && x < 5 && y > 0 && y < 5;
-  return `<i class="${inner && '1011010100110010'[(y - 1) * 4 + (x - 1)] === '1' ? 'w' : ''}"></i>`;
-}).join('');
+// Start screen: a real 4×4 marker that flips its cells from one ID to the next, the way
+// the reader sees them. One cell wave every two seconds while the start screen shows.
+(function startMarker() {
+  const NS = 'http://www.w3.org/2000/svg';
+  const quiet = document.createElementNS(NS, 'rect');
+  quiet.setAttribute('class', 'quiet');
+  quiet.setAttribute('width', 8); quiet.setAttribute('height', 8);
+  const cells = Array.from({ length: 36 }, (_, i) => {
+    const el = document.createElementNS(NS, 'rect');
+    el.setAttribute('x', 1 + (i % 6)); el.setAttribute('y', 1 + ((i / 6) | 0));
+    el.setAttribute('width', 1); el.setAttribute('height', 1);
+    el.style.setProperty('--d', `${((i % 6) + ((i / 6) | 0)) * 22}ms`); // a diagonal wave
+    return el;
+  });
+  $('mark').replaceChildren(quiet, ...cells);
+  const show = (bits, id) => {
+    cells.forEach((el, i) => {
+      const x = i % 6, y = (i / 6) | 0;
+      const inner = x > 0 && x < 5 && y > 0 && y < 5;
+      el.classList.toggle('w', inner && bits[(y - 1) * 4 + (x - 1)] === '1');
+    });
+    $('markCaption').textContent = `4×4 · ID ${id}`;
+  };
+  show('1011010100110010', 0); // DICT_4X4 ID 0, drawn before the dictionary loads
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const ids = [0, 7, 23, 42, 3, 17, 31, 12];
+  let k = 0;
+  loadDictionary('ARUCO_4X4_1000').then(() => {
+    const dict = drawingDictionary('ARUCO_4X4_1000');
+    const timer = setInterval(() => {
+      if ($('gate').hidden) { clearInterval(timer); return; }
+      k = (k + 1) % ids.length;
+      show(dict.codeList[ids[k]], ids[k]);
+    }, 2000);
+  }, () => {});
+})();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   // An update was installed in the background: load it right away if the camera is not

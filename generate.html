@@ -3,61 +3,52 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#000000">
-<title>Marker Sheets</title>
+<meta name="theme-color" content="#ffffff">
+<title>Print Markers</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="ui.css?v=22">
 <style>
-  :root {
-    --bg: #000; --panel: #111113; --hair: rgba(255,255,255,0.14); --fg: #fff; --dim: #8e8e93; --on: #2f6bff;
-    --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
-    --sans: -apple-system, system-ui, "Roboto", "Helvetica Neue", sans-serif;
-    --sl: max(16px, env(safe-area-inset-left, 0px)); --sr: max(16px, env(safe-area-inset-right, 0px));
-    color-scheme: dark;
-  }
-  * { box-sizing: border-box; }
-  [hidden] { display: none !important; }
+  /* Sheet generator. Shared tokens and components live in ui.css. The controls are paper;
+     the sheets sit on a light grey desk so their edges read. */
   html, body { overflow-x: hidden; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.4 var(--sans); }
-  :focus-visible { outline: 2px solid var(--on); outline-offset: 2px; }
+  body { --desk: #e8e8e8; background: var(--desk); }
   .controls {
-    position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--hair);
-    padding: calc(env(safe-area-inset-top, 0px) + 12px) var(--sr) 12px var(--sl);
-    display: flex; flex-wrap: wrap; gap: 10px; align-items: end;
+    position: sticky; top: 0; z-index: 2; background: var(--paper); border-bottom: 2px solid var(--ink);
+    padding: calc(env(safe-area-inset-top, 0px) + 14px) var(--sr) 14px var(--sl);
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: end;
   }
-  .controls h1 { flex: 1 0 100%; margin: 0; font: 800 20px var(--sans); display: flex; align-items: center; gap: 12px; }
-  .controls h1 a { margin-left: auto; font: 600 13px var(--sans); color: var(--fg); text-decoration: none; border: 1px solid var(--hair); border-radius: 9px; padding: 7px 12px; }
-  label { display: grid; gap: 4px; font: 600 11px var(--sans); letter-spacing: 0.06em; text-transform: uppercase; color: var(--dim); min-width: 0; }
-  select, input { height: 38px; max-width: 100%; border-radius: 9px; border: 1px solid var(--hair); background: rgba(255,255,255,0.06); color: var(--fg); padding: 0 10px; font: 15px var(--mono); text-transform: none; letter-spacing: 0; }
-  input[type=number] { width: 76px; }
-  input.ids { width: 150px; }
-  button.print { height: 38px; border: 0; border-radius: 9px; background: var(--fg); color: #000; font: 700 15px var(--sans); padding: 0 16px; cursor: pointer; }
-  .note { flex: 1 0 100%; color: var(--dim); font-size: 13px; margin: 0; }
-  .note.warn { color: #ff9f0a; }
+  .controls h1 { flex: 1 0 100%; margin: 0; display: flex; align-items: center; gap: 12px; font: 850 28px/1 var(--font); font-stretch: 125%; letter-spacing: -0.01em; }
+  .controls h1 a { margin-left: auto; }
+  label { display: grid; gap: 6px; font: 650 14px var(--font); min-width: 0; }
+  input[type=number] { width: 88px; }
+  input.ids { width: 160px; }
+  .note { flex: 1 0 100%; margin: 0; font-size: 14px; }
+  .note.warn { color: var(--alert); font-weight: 600; }
   /* On phones the controls fold into one line until "Edit" is tapped, so the sheet gets the screen. */
   .fold { display: none; }
   @media (max-width: 600px) {
     .fold { display: flex; align-items: center; gap: 10px; flex: 1 0 100%; }
-    .fold span { flex: 1; min-width: 0; font: 600 14px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .fold button { height: 34px; padding: 0 14px; border-radius: 9px; border: 1px solid var(--hair); background: transparent; color: var(--fg); font: 600 14px var(--sans); }
+    .fold span { flex: 1; min-width: 0; font: 650 15px var(--font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .controls.folded > :not(h1):not(.fold):not(.print):not(.warn) { display: none !important; }
+    .controls { position: static; }
   }
-  .summary { margin: 0; padding: 12px var(--sr) 0 var(--sl); color: var(--dim); font: 600 13px var(--sans); font-variant-numeric: tabular-nums; }
+  .summary { margin: 0; padding: 14px var(--sr) 0 var(--sl); color: var(--graphite); font: 600 14px var(--font); font-variant-numeric: tabular-nums; }
 
   /* Pages are laid out at true size in mm; on screen each sits in a wrapper scaled to fit the width. */
   .pages { display: grid; justify-items: center; gap: 16px; padding: 12px var(--sr) 40px var(--sl); }
-  .pagewrap { width: calc(var(--pw) * var(--s, 1)); height: calc(var(--ph) * var(--s, 1)); box-shadow: 0 2px 14px rgba(0,0,0,0.6); }
+  .pagewrap { width: calc(var(--pw) * var(--s, 1)); height: calc(var(--ph) * var(--s, 1)); box-shadow: 0 1px 3px rgba(0,0,0,0.18), 0 8px 24px rgba(0,0,0,0.08); }
   .page { position: relative; overflow: hidden; width: var(--pw); height: var(--ph); background: #fff; color: #000; transform: scale(var(--s, 1)); transform-origin: 0 0; }
   .slot { position: absolute; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1mm; }
   .slot svg { display: block; flex: none; shape-rendering: crispEdges; }
-  .cap { font: 600 2.6mm/3mm var(--mono); white-space: nowrap; }
+  .cap { font: 650 2.6mm/3mm var(--font); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .cut { position: absolute; border: 0 dashed #bbb; }
   .cut.v { width: 0; border-left-width: 0.2mm; }
   .cut.h { height: 0; border-top-width: 0.2mm; }
-  .foot { position: absolute; display: flex; align-items: center; justify-content: space-between; gap: 4mm; font: 2.4mm/3mm var(--sans); color: #444; white-space: nowrap; }
+  .foot { position: absolute; display: flex; align-items: center; justify-content: space-between; gap: 4mm; font: 500 2.4mm/3mm var(--font); color: #444; white-space: nowrap; }
   .foot .bar { display: flex; align-items: center; gap: 1.5mm; }
   .foot svg { display: block; }
 
-  @media (max-width: 600px) { .controls { position: static; } }
   @media print {
     html, body { overflow: visible; background: #fff; }
     .controls, .summary { display: none; }
@@ -72,20 +63,20 @@
 </head>
 <body>
 <div class="controls folded" id="controls">
-  <h1>Marker Sheets <a href="./">Open reader</a></h1>
-  <div class="fold"><span id="foldText"></span><button id="foldBtn" aria-expanded="false" aria-controls="controls">Edit</button></div>
+  <h1>Print markers <a class="btn line small" href="./">Reader</a></h1>
+  <div class="fold"><span id="foldText"></span><button class="btn line small" id="foldBtn" aria-expanded="false" aria-controls="controls">Edit</button></div>
   <label>Set <select id="set"></select></label>
   <label>Paper <select id="paper"><option value="a4">A4</option><option value="letter">Letter</option></select></label>
   <label>Orientation <select id="orient"><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
-  <label>Size (mm) <input id="size" type="number" min="10" max="250" value="50" inputmode="decimal"></label>
+  <label>Size, mm <input id="size" type="number" min="10" max="250" value="50" inputmode="decimal"></label>
   <label>IDs <select id="mode"><option value="fill">Fill pages</option><option value="list">List</option></select></label>
   <label data-mode="fill">From ID <input id="start" type="number" min="0" value="0" inputmode="numeric"></label>
   <label data-mode="fill">Pages <input id="pages" type="number" min="1" max="300" value="1" inputmode="numeric"></label>
-  <label data-mode="list" hidden>List <input id="ids" class="ids" value="0-11" inputmode="numeric" aria-describedby="hint"></label>
+  <label data-mode="list" hidden>List <input id="ids" class="ids" value="0-11" placeholder="0-11, 20-24" inputmode="numeric"></label>
   <label>Labels <select id="labels"><option value="1">On</option><option value="0">Off</option></select></label>
   <label>Cut lines <select id="cuts"><option value="1">On</option><option value="0">Off</option></select></label>
-  <button class="print" id="print">Print</button>
-  <p class="note" id="hint">List: ranges and lists, like <code>0-11</code> or <code>3, 7, 20-24</code>. Size is the black square, edge to edge. Print at 100% scale (turn off “fit to page”) and check the 10 mm bar with a ruler.</p>
+  <button class="btn ink print" id="print">Print</button>
+  <p class="note" id="hint">Print at 100%, then check the 10 mm bar with a ruler.</p>
   <p class="note warn" id="warn" hidden></p>
 </div>
 <p class="summary" id="summary"></p>
@@ -93,20 +84,9 @@
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
+<script src="markers.js?v=22"></script>
 <script>
-const SETS = [
-  ...['4X4', '5X5', '6X6', '7X7'].flatMap((n) => [50, 100, 250, 1000].map((c) => ({ label: `DICT_${n}_${c}`, base: `ARUCO_${n}_1000`, count: c }))),
-  { label: 'DICT_ARUCO_ORIGINAL', base: 'ARUCO_DEFAULT_OPENCV' },
-  { label: 'DICT_ARUCO_MIP_36h12', base: 'ARUCO_MIP_36h12' },
-  { label: 'DICT_APRILTAG_16h5', base: 'APRILTAG_16h5' },
-  { label: 'DICT_APRILTAG_25h9', base: 'APRILTAG_25h9' },
-  { label: 'DICT_APRILTAG_36h11', base: 'APRILTAG_36h11' },
-];
-const FILES = {
-  ARUCO_4X4_1000: 'aruco_4x4_1000', ARUCO_5X5_1000: 'aruco_5x5_1000', ARUCO_6X6_1000: 'aruco_6x6_1000',
-  ARUCO_7X7_1000: 'aruco_7x7_1000', ARUCO_DEFAULT_OPENCV: 'aruco_default_opencv', ARUCO_MIP_36h12: 'aruco_mip_36h12',
-  APRILTAG_36h11: 'apriltag_36h11', APRILTAG_25h9: 'apriltag_25h9', APRILTAG_16h5: 'apriltag_16h5',
-};
+const SETS = MARKER_SETS.map((s) => ({ label: s.name, base: s.base, count: s.count }));
 const PAPERS = { a4: { name: 'A4', w: 210, h: 297 }, letter: { name: 'letter', w: 215.9, h: 279.4 } };
 // All layout numbers are millimetres.
 const MARGIN = 10, GAP = 4, FOOT = 6, LABEL = 4;
@@ -125,36 +105,22 @@ try {
 // US and Canada mostly print on Letter.
 if (/-(US|CA)$/i.test(navigator.language || '')) $('paper').value = 'letter';
 
-const loaded = {};
-function loadDict(base) {
-  if (AR.DICTIONARIES[base]) return Promise.resolve();
-  return loaded[base] || (loaded[base] = new Promise((res, rej) => {
-    const s = document.createElement('script');
-    s.src = 'vendor/dictionaries/' + FILES[base] + '.js';
-    s.onload = res; s.onerror = rej;
-    document.head.append(s);
-  }));
-}
-const dicts = {};
-function getDict(base) {
-  if (dicts[base]) return dicts[base];
-  const def = AR.DICTIONARIES[base], saved = def.tau;
-  def.tau = 1; // skip the library's slow distance scan; drawing does not need it
-  dicts[base] = new AR.Dictionary(base);
-  def.tau = saved;
-  return dicts[base];
-}
-
+// IDs from "0-11, 20, 30-35". Out-of-range IDs are dropped before the cap, so an early
+// range above the set's size can't crowd out valid IDs listed after it.
 function parseIds(text, max) {
-  const out = [];
+  const ids = [];
+  let skipped = 0, capped = false;
   for (const part of text.split(/[\s,]+/).filter(Boolean)) {
     const m = part.match(/^(\d+)(?:-(\d+))?$/);
     if (!m) return { error: `“${part}” is not an ID or range.` };
-    const a = +m[1], b = m[2] != null ? +m[2] : a;
-    for (let i = Math.min(a, b); i <= Math.max(a, b) && out.length <= MAX_MARKERS; i++) out.push(i);
+    const lo = Math.min(+m[1], m[2] != null ? +m[2] : +m[1]), hi = Math.max(+m[1], m[2] != null ? +m[2] : +m[1]);
+    if (hi > max) skipped += hi - Math.max(lo, max + 1) + 1;
+    for (let i = lo; i <= Math.min(hi, max); i++) {
+      if (ids.length === MAX_MARKERS) { capped = true; break; }
+      ids.push(i);
+    }
   }
-  const bad = out.filter((i) => i > max);
-  return { ids: out.filter((i) => i <= max).slice(0, MAX_MARKERS), bad, capped: out.length > MAX_MARKERS };
+  return { ids, skipped, capped };
 }
 
 // Grid for one page. Each marker gets an equal slot; slots are at least GAP wider/taller than the
@@ -214,9 +180,9 @@ async function render() {
   const listMode = $('mode').value === 'list';
   for (const el of document.querySelectorAll('[data-mode]')) el.hidden = (el.dataset.mode === 'list') !== listMode;
   const set = SETS.find((s) => s.label === setSel.value);
-  try { await loadDict(set.base); } catch { return showWarn(`Could not load ${set.label}. Check your connection and try again.`); }
+  try { await loadDictionary(set.base); } catch { return showWarn(`Could not load ${set.label}. Check your connection and try again.`); }
   if (mine !== token) return; // a newer render started while the dictionary loaded
-  const dict = getDict(set.base);
+  const dict = drawingDictionary(set.base);
   const max = (set.count || dict.codeList.length) - 1;
   const opts = { labels: $('labels').value === '1', cuts: $('cuts').value === '1' };
   const paper = PAPERS[$('paper').value], landscape = $('orient').value === 'landscape';
@@ -228,7 +194,7 @@ async function render() {
     const p = parseIds($('ids').value, max);
     if (p.error) return showWarn(p.error);
     ids = p.ids;
-    warn = p.bad.length ? `IDs above ${max} are not in ${set.label} and were skipped.` : p.capped ? `Showing the first ${MAX_MARKERS} markers.` : '';
+    warn = p.skipped ? `IDs above ${max} are not in ${set.label} and were skipped.` : p.capped ? `Showing the first ${MAX_MARKERS} markers.` : '';
   } else {
     const start = Math.max(0, Math.floor(+$('start').value || 0));
     const pages = Math.max(1, Math.floor(+$('pages').value || 1));

@@ -27,6 +27,7 @@ Phone-first ArUco / AprilTag tools. Static site, no build step, nothing leaves t
 - Optional 4K camera stream (Settings → More → Camera): same cost per pass, the center pass reads native pixels for roughly double the range
 - Tolerates a few blurred cells while still requiring an exact code match
 - Adaptive thresholding that cycles settings when nothing is found (dim light, big tags)
+- Tap the picture to freeze it, tap again to resume
 - Pinch to zoom: uses the camera's zoom where available, otherwise a digital zoom that also points detection at what you see
 - Bottom list shows a mini drawing of each tag read, its ID, and how many times it was read; tags in view are ringed
 - Uses the plain wide back lens instead of iPhone's combined camera, which hops between lenses while focusing (a visible jump); other lenses selectable in Settings → More
@@ -37,5 +38,7 @@ Phone-first ArUco / AprilTag tools. Static site, no build step, nothing leaves t
 Print-ready sheets laid out in millimetres: pick a set, paper (A4 or Letter, portrait or landscape) and the black-square size, then either fill whole pages from a starting ID or list IDs (`0-11`, `3, 7, 20-24`). Optional labels and cut lines; each page has a footer and a 10 mm scale bar to check print size with a ruler. Print at 100% scale. Opens on the set the reader last used.
 
 ## Credits
+
+Type: [Archivo](https://github.com/Omnibus-Type/Archivo) (SIL Open Font License, `fonts/OFL.txt`), stored with the app so it works offline.
 
 Detection core: [js-aruco2](https://github.com/damianofalcioni/js-aruco2) 2.0.0 (MIT), dictionaries from OpenCV (BSD). See `vendor/LICENSE-js-aruco2.txt`.

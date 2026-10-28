@@ -1,0 +1,105 @@
+/* ArUco Tools: shared design tokens and components.
+   The look follows the thing it reads: printed markers. Black ink on white paper, the
+   same two values a marker uses. Selection is shown by inversion, like a marker cell
+   flipping. The only colour is each tag's own outline hue. One typeface, Archivo:
+   expanded widths for headings, normal width for text. */
+
+@font-face {
+  font-family: 'Archivo';
+  src: url('fonts/archivo-latin.woff2') format('woff2');
+  font-weight: 100 900;
+  font-stretch: 62% 125%;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --ink: #000;
+  --paper: #fff;
+  --graphite: #555; /* secondary text on paper, 7.5:1 */
+  --alert: #c4001a;
+  --glass: rgba(0, 0, 0, 0.5);
+  --r-s: 6px;
+  --r-m: 14px;
+  --font: 'Archivo', -apple-system, system-ui, 'Roboto', 'Helvetica Neue', sans-serif;
+  --sl: max(16px, env(safe-area-inset-left, 0px));
+  --sr: max(16px, env(safe-area-inset-right, 0px));
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 400 16px/1.45 var(--font); -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+
+h1, h2, h3 { text-wrap: balance; }
+h2 { font: 800 24px/1.1 var(--font); font-stretch: 118%; letter-spacing: -0.01em; }
+h3 { font: 700 16px/1.25 var(--font); }
+p { color: var(--graphite); font-size: 15px; line-height: 1.45; }
+a { color: inherit; }
+
+/* Buttons: ink (primary), line (secondary), text (inline). */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 54px; padding: 0 20px; border: 2px solid var(--ink); border-radius: var(--r-s);
+  font: 700 17px var(--font); text-decoration: none; cursor: pointer;
+  background: var(--paper); color: var(--ink);
+  transition: transform 80ms ease-out;
+}
+.btn:active { transform: scale(0.97); }
+.btn.ink { background: var(--ink); color: var(--paper); }
+.btn.line:active { background: var(--ink); color: var(--paper); }
+.btn.small { height: 42px; padding: 0 14px; font-size: 15px; }
+.btn.text { border-color: transparent; height: 40px; padding: 0 10px; font-weight: 650; font-size: 15px; background: transparent; }
+.btn.text:active { background: var(--ink); color: var(--paper); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+
+/* Choices: cells that invert when chosen. */
+.opts { display: flex; flex-wrap: wrap; gap: 8px; }
+.opts button {
+  height: 42px; padding: 0 14px; border: 2px solid var(--ink); border-radius: var(--r-s);
+  background: var(--paper); color: var(--ink); font: 600 15px var(--font); cursor: pointer;
+  font-variant-numeric: tabular-nums; transition: transform 80ms ease-out;
+}
+.opts button:active { transform: scale(0.97); }
+.opts button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+
+select, input {
+  height: 48px; padding: 0 12px; border: 2px solid var(--ink); border-radius: var(--r-s);
+  background: var(--paper); color: var(--ink); font: 600 16px var(--font); max-width: 100%;
+}
+select { padding-right: 32px; appearance: none; -webkit-appearance: none;
+  background: var(--paper) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 4l4 4 4-4' fill='none' stroke='%23000' stroke-width='2'/%3E%3C/svg%3E") no-repeat right 12px center / 12px; }
+input[type=number] { font-variant-numeric: tabular-nums; }
+
+/* Printer's crop marks at the four corners of whatever sits inside. */
+.crop {
+  padding: 16px;
+  --m: linear-gradient(var(--ink), var(--ink));
+  background:
+    var(--m) top left / 16px 2px no-repeat, var(--m) top left / 2px 16px no-repeat,
+    var(--m) top right / 16px 2px no-repeat, var(--m) top right / 2px 16px no-repeat,
+    var(--m) bottom left / 16px 2px no-repeat, var(--m) bottom left / 2px 16px no-repeat,
+    var(--m) bottom right / 16px 2px no-repeat, var(--m) bottom right / 2px 16px no-repeat;
+}
+
+/* A marker drawn as SVG cells (border included) in a one-cell white quiet zone;
+   crisp edges, so neighbouring cells never show seams. */
+/* Generated marker images (cards, the shown marker, printed sheets): no seams either. */
+.crisp svg, svg.crisp { shape-rendering: crispEdges; }
+
+.mark { display: block; width: min(54vw, 232px); height: auto; shape-rendering: crispEdges; }
+.mark rect { fill: var(--ink); transition: fill 180ms ease-in-out; transition-delay: var(--d, 0ms); }
+.mark rect.w, .mark .quiet { fill: var(--paper); }
+
+@keyframes sheet-in { from { transform: translateY(40px); opacity: 0.4; } }
+@keyframes fade-in { from { opacity: 0; } }
+@keyframes pop { from { transform: scale(0.6); opacity: 0; } }
+.card.new { animation: pop 240ms cubic-bezier(0.2, 0.9, 0.3, 1.25); }
+
+@media (prefers-reduced-motion: reduce) {
+  .btn, .btn:active, .opts button, .opts button:active { transition: none; transform: none; }
+  .mark rect { transition: none; }
+  .settings:not([hidden]), .scrim:not([hidden]), .card.new { animation: none !important; }
+}

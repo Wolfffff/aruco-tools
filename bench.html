@@ -3,54 +3,47 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#000000">
+<meta name="theme-color" content="#ffffff">
 <title>Reader Speed Test</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preload" href="fonts/archivo-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="ui.css?v=22">
 <style>
-  :root {
-    --bg: #000; --panel: #1c1c1e; --hair: rgba(255,255,255,0.12); --fg: #fff; --dim: #8e8e93; --good: #30d158; --warn: #ff9f0a;
-    --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
-    --sans: -apple-system, system-ui, "Roboto", "Helvetica Neue", sans-serif;
-    color-scheme: dark;
-  }
-  * { box-sizing: border-box; }
-  [hidden] { display: none !important; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 var(--sans); }
-  main { max-width: 560px; margin: 0 auto; padding: calc(env(safe-area-inset-top, 0px) + 20px) max(16px, env(safe-area-inset-right, 0px)) 32px max(16px, env(safe-area-inset-left, 0px)); display: grid; gap: 16px; }
+  /* Speed test. Shared tokens and components live in ui.css. */
+  main { max-width: 560px; margin: 0 auto; padding: calc(env(safe-area-inset-top, 0px) + 20px) var(--sr) 32px var(--sl); display: grid; gap: 18px; }
   header { display: flex; align-items: center; gap: 12px; }
-  h1 { margin: 0; font: 800 24px var(--sans); flex: 1; }
-  a { color: var(--fg); }
-  header a { font: 600 13px var(--sans); text-decoration: none; border: 1px solid var(--hair); border-radius: 9px; padding: 7px 12px; }
-  p { margin: 0; color: var(--dim); }
+  h1 { margin: 0; flex: 1; font: 850 32px/1 var(--font); font-stretch: 125%; letter-spacing: -0.01em; }
+  p { margin: 0; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; }
-  button { height: 44px; padding: 0 18px; border-radius: 12px; border: 0; font: 700 16px var(--sans); cursor: pointer; }
-  .go { background: var(--fg); color: #000; }
-  .ghost { background: transparent; color: var(--fg); border: 1px solid var(--hair); }
-  button:disabled { opacity: 0.5; }
   .wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font: 14px var(--mono); font-variant-numeric: tabular-nums; }
-  th, td { text-align: right; padding: 8px 6px; border-bottom: 1px solid var(--hair); white-space: nowrap; }
+  table { width: 100%; border-collapse: collapse; font: 500 15px var(--font); font-variant-numeric: tabular-nums; }
+  caption { text-align: left; font: 700 16px var(--font); padding-bottom: 6px; }
+  th, td { text-align: right; padding: 10px 6px; border-bottom: 1px solid #ccc; white-space: nowrap; }
   th:first-child, td:first-child { text-align: left; }
-  th { color: var(--dim); font: 600 11px var(--sans); letter-spacing: 0.06em; text-transform: uppercase; }
-  .ok { color: var(--good); } .slow { color: var(--warn); }
-  #status { font: 13px var(--mono); color: var(--dim); min-height: 1.4em; }
-  pre { margin: 0; padding: 12px; background: var(--panel); border-radius: 10px; font: 12px var(--mono); white-space: pre-wrap; color: var(--dim); }
+  thead th { font: 650 13px var(--font); color: var(--graphite); border-bottom: 2px solid var(--ink); }
+  /* Keeps up with a 30 fps camera: bold. Falls behind: plain. */
+  .ok { font-weight: 800; }
+  .slow { color: var(--graphite); }
+  #status { font: 500 14px var(--font); color: var(--graphite); min-height: 1.4em; }
+  pre { margin: 0; padding: 12px; border: 2px solid var(--ink); border-radius: var(--r-s); font: 500 13px/1.5 var(--font); white-space: pre-wrap; }
 </style>
 </head>
 <body>
 <main>
-  <header><h1>Speed test</h1><a href="./">Open reader</a></header>
-  <p>Runs the reader's real detector on generated frames with six tags and background clutter, at each scan size, then with several workers in parallel. Takes about 20 seconds. Keep this tab in front.</p>
+  <header><h1>Speed test</h1><a class="btn line small" href="./">Reader</a></header>
+  <p>Runs the real detector on this phone. About 20 seconds; keep the screen on.</p>
   <div class="row">
-    <button class="go" id="run">Run speed test</button>
-    <button class="ghost" id="copy" disabled>Copy results</button>
+    <button class="btn ink" id="run">Run test</button>
+    <button class="btn line" id="copy" disabled>Copy results</button>
   </div>
   <div id="status"></div>
   <div class="wrap"><table id="sizes" hidden>
-    <thead><tr><th>Scan size</th><th>ms / frame</th><th>Tags found</th><th>Reads / s, 1 worker</th></tr></thead><tbody></tbody>
+    <caption>By scan size, one worker</caption>
+    <thead><tr><th>Size</th><th>ms per frame</th><th>Found</th><th>Reads/s</th></tr></thead><tbody></tbody>
   </table></div>
   <div class="wrap"><table id="pool" hidden>
-    <thead><tr><th>Workers</th><th>Reads / s at 960</th><th>vs 1 worker</th></tr></thead><tbody></tbody>
+    <caption>By workers, at 960</caption>
+    <thead><tr><th>Workers</th><th>Reads/s</th><th>vs one</th></tr></thead><tbody></tbody>
   </table></div>
   <pre id="summary" hidden></pre>
 </main>
@@ -58,6 +51,7 @@
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
 <script src="vendor/dictionaries/aruco_4x4_1000.js"></script>
+<script src="markers.js?v=22"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 const SIZES = [640, 960, 1280, 1920];
@@ -65,10 +59,7 @@ const IDS = [3, 8, 15, 21, 30, 42];
 const CAMERA_FPS = 30;
 
 function makeTags() {
-  const def = AR.DICTIONARIES.ARUCO_4X4_1000, saved = def.tau;
-  def.tau = 1; // skip the library's slow distance scan; drawing does not need it
-  const dict = new AR.Dictionary('ARUCO_4X4_1000');
-  def.tau = saved;
+  const dict = drawingDictionary('ARUCO_4X4_1000');
   return Promise.all(IDS.map((id) => new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve(img);
@@ -99,8 +90,12 @@ function frame(tags, long) {
   return x.getImageData(0, 0, W, H);
 }
 
+// Same versioned worker as the reader, taken from this page's markers.js?v=N.
+const BUILD = new URL(document.querySelector('script[src^="markers.js"]').src).search;
 function newWorker() {
-  return new Worker('worker.js?bench=' + Date.now());
+  const w = new Worker('worker.js' + BUILD);
+  w.onerror = () => status('The detector could not load. Open the page once while online.');
+  return w;
 }
 
 function read(worker, img) {
