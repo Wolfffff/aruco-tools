@@ -1,5 +1,5 @@
 // Network first so updates show up immediately; cache is the offline fallback.
-const CACHE = 'aruco-reader-v1';
+const CACHE = 'aruco-tools-v1';
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener('fetch', (e) => {

@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Marker Sheets</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #000; --panel: #111113; --hair: rgba(255,255,255,0.14); --fg: #fff; --dim: #8e8e93; --on: #2f6bff;
+    --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, monospace;
+    --sans: -apple-system, system-ui, "Roboto", "Helvetica Neue", sans-serif;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.4 var(--sans); }
+  .controls {
+    position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--hair);
+    padding: calc(env(safe-area-inset-top, 0px) + 12px) max(16px, env(safe-area-inset-right, 0px)) 12px max(16px, env(safe-area-inset-left, 0px));
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: end;
+  }
+  .controls h1 { flex: 1 0 100%; margin: 0; font: 800 20px var(--sans); display: flex; align-items: center; gap: 12px; }
+  .controls h1 a { margin-left: auto; font: 600 13px var(--sans); color: var(--fg); text-decoration: none; border: 1px solid var(--hair); border-radius: 9px; padding: 7px 12px; }
+  label { display: grid; gap: 4px; font: 600 11px var(--sans); letter-spacing: 0.06em; text-transform: uppercase; color: var(--dim); }
+  select, input { height: 38px; border-radius: 9px; border: 1px solid var(--hair); background: rgba(255,255,255,0.06); color: var(--fg); padding: 0 10px; font: 15px var(--mono); text-transform: none; letter-spacing: 0; }
+  input[type=number] { width: 92px; }
+  input.ids { width: 150px; }
+  button.print { height: 38px; border: 0; border-radius: 9px; background: var(--fg); color: #000; font: 700 15px var(--sans); padding: 0 16px; }
+  .note { flex: 1 0 100%; color: var(--dim); font-size: 13px; margin: 0; }
+  .note.warn { color: #ff9f0a; }
+
+  .sheet { display: flex; flex-wrap: wrap; gap: 8mm; padding: 16px max(16px, env(safe-area-inset-right, 0px)) 40px max(16px, env(safe-area-inset-left, 0px)); background: #fff; color: #000; min-height: 60vh; }
+  .cell { display: grid; justify-items: center; gap: 2mm; break-inside: avoid; }
+  .cell svg { display: block; }
+  .cell .cap { font: 600 9pt var(--mono); }
+
+  @media (max-width: 600px) { .controls { position: static; } }
+  @media print {
+    @page { margin: 10mm; }
+    body { background: #fff; }
+    .controls { display: none; }
+    .sheet { padding: 0; min-height: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="controls">
+  <h1>Marker Sheets <a href="./">Open reader</a></h1>
+  <label>Set <select id="set"></select></label>
+  <label>IDs <input id="ids" class="ids" value="0-11" inputmode="numeric" aria-describedby="hint"></label>
+  <label>Size (mm) <input id="size" type="number" min="10" max="250" value="50"></label>
+  <label>Labels <select id="labels"><option value="1">On</option><option value="0">Off</option></select></label>
+  <button class="print" id="print">Print</button>
+  <p class="note" id="hint">IDs: ranges and lists, like <code>0-11</code> or <code>3, 7, 20-24</code>. Size is the black square, edge to edge. Print at 100% scale (turn off “fit to page”) and check one with a ruler.</p>
+  <p class="note warn" id="warn" hidden></p>
+</div>
+<div class="sheet" id="sheet"></div>
+
+<script src="vendor/cv.js"></script>
+<script src="vendor/aruco.js"></script>
+<script>
+const SETS = [
+  ...['4X4', '5X5', '6X6', '7X7'].flatMap((n) => [50, 100, 250, 1000].map((c) => ({ label: `DICT_${n}_${c}`, base: `ARUCO_${n}_1000`, count: c }))),
+  { label: 'DICT_ARUCO_ORIGINAL', base: 'ARUCO_DEFAULT_OPENCV' },
+  { label: 'DICT_ARUCO_MIP_36h12', base: 'ARUCO_MIP_36h12' },
+  { label: 'DICT_APRILTAG_16h5', base: 'APRILTAG_16h5' },
+  { label: 'DICT_APRILTAG_25h9', base: 'APRILTAG_25h9' },
+  { label: 'DICT_APRILTAG_36h11', base: 'APRILTAG_36h11' },
+];
+const FILES = {
+  ARUCO_4X4_1000: 'aruco_4x4_1000', ARUCO_5X5_1000: 'aruco_5x5_1000', ARUCO_6X6_1000: 'aruco_6x6_1000',
+  ARUCO_7X7_1000: 'aruco_7x7_1000', ARUCO_DEFAULT_OPENCV: 'aruco_default_opencv', ARUCO_MIP_36h12: 'aruco_mip_36h12',
+  APRILTAG_36h11: 'apriltag_36h11', APRILTAG_25h9: 'apriltag_25h9', APRILTAG_16h5: 'apriltag_16h5',
+};
+const MAX_MARKERS = 300;
+const $ = (id) => document.getElementById(id);
+const setSel = $('set');
+for (const s of SETS) setSel.add(new Option(s.label, s.label));
+
+// Pick up the reader's last set, so "print what I'm scanning" is one tap away.
+try {
+  const fam = localStorage.getItem('family'), size = localStorage.getItem('size');
+  const key = fam && fam.toUpperCase().replace('APRIL ', 'APRILTAG_').replace(' ', '_');
+  const guess = key && SETS.find((s) => s.label.toUpperCase().includes(key) && (!s.count || String(s.count) === size));
+  if (guess) setSel.value = guess.label;
+} catch {}
+
+const loaded = {};
+function loadDict(base) {
+  if (AR.DICTIONARIES[base]) return Promise.resolve();
+  return loaded[base] || (loaded[base] = new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'vendor/dictionaries/' + FILES[base] + '.js';
+    s.onload = res; s.onerror = rej;
+    document.head.append(s);
+  }));
+}
+const dicts = {};
+function getDict(base) {
+  if (dicts[base]) return dicts[base];
+  const def = AR.DICTIONARIES[base], saved = def.tau;
+  def.tau = 1; // skip the library's slow distance scan; drawing does not need it
+  dicts[base] = new AR.Dictionary(base);
+  def.tau = saved;
+  return dicts[base];
+}
+
+function parseIds(text, max) {
+  const out = [];
+  for (const part of text.split(/[\s,]+/).filter(Boolean)) {
+    const m = part.match(/^(\d+)(?:-(\d+))?$/);
+    if (!m) return { error: `“${part}” is not an ID or range.` };
+    const a = +m[1], b = m[2] != null ? +m[2] : a;
+    for (let i = Math.min(a, b); i <= Math.max(a, b) && out.length <= MAX_MARKERS; i++) out.push(i);
+  }
+  const bad = out.filter((i) => i > max);
+  return { ids: out.filter((i) => i <= max).slice(0, MAX_MARKERS), bad, capped: out.length > MAX_MARKERS };
+}
+
+async function render() {
+  const set = SETS.find((s) => s.label === setSel.value);
+  await loadDict(set.base);
+  const dict = getDict(set.base);
+  const max = (set.count || dict.codeList.length) - 1;
+  const { ids, bad, capped, error } = parseIds($('ids').value, max);
+  const warn = error || (bad?.length ? `IDs above ${max} are not in ${set.label} and were skipped.` : capped ? `Showing the first ${MAX_MARKERS} markers.` : '');
+  $('warn').textContent = warn;
+  $('warn').hidden = !warn;
+  if (error) return;
+
+  const mm = Math.max(10, Math.min(250, +$('size').value || 50));
+  const n = dict.markSize; // cells across the black square, border included
+  const sheet = $('sheet');
+  sheet.replaceChildren();
+  for (const id of ids) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    // generateSVG adds one white cell of quiet zone on each side; size the SVG so the black square is exactly `mm`.
+    cell.innerHTML = dict.generateSVG(id).replace('<svg ', `<svg width="${(mm * (n + 2)) / n}mm" height="${(mm * (n + 2)) / n}mm" `);
+    if ($('labels').value === '1') {
+      const cap = document.createElement('div');
+      cap.className = 'cap';
+      cap.textContent = `${set.label} · ${id} · ${mm} mm`;
+      cell.append(cap);
+    }
+    sheet.append(cell);
+  }
+}
+
+for (const id of ['set', 'ids', 'size', 'labels']) $(id).addEventListener('input', render);
+$('print').onclick = () => window.print();
+render();
+</script>
+</body>
+</html>

@@ -105,6 +105,7 @@
   .go { height: 52px; border: 0; border-radius: 14px; background: var(--fg); color: #000; font-weight: 700; font-size: 17px; }
   .ghost { height: 44px; border: 1px solid var(--hair); border-radius: 14px; background: transparent; font-weight: 600; }
   .err { color: #ff6961; font-size: 14px; }
+  .link { display: grid; place-items: center; color: var(--fg); text-decoration: none; }
   .mark { width: 96px; height: 96px; display: grid; grid-template-columns: repeat(6, 1fr); border: 8px solid #fff; }
   .mark i { background: #000; }
   .mark i.w { background: #fff; }
@@ -117,6 +118,7 @@
   }
   .sheet select, .sheet input, .sheet header button { height: 36px; border-radius: 9px; border: 1px solid var(--hair); background: rgba(255,255,255,0.08); padding: 0 10px; }
   .sheet input { width: 80px; font-family: var(--mono); }
+  .sheet .print-link { height: 36px; display: inline-flex; align-items: center; padding: 0 10px; border-radius: 9px; border: 1px solid var(--hair); color: #fff; text-decoration: none; }
   .sheet .done { margin-left: auto; background: #fff !important; color: #000; font-weight: 700; }
   .sheet .body { display: grid; place-items: center; padding: 20px; min-height: 0; }
   #markerSvg svg { width: min(80vw, 64vh); height: auto; display: block; }
@@ -161,6 +163,7 @@
     <p>Live ArUco and AprilTag detection. Runs entirely on your phone.</p>
     <button class="go" id="start">Open camera</button>
     <button class="ghost" id="gateMarker">Show a marker</button>
+    <a class="ghost link" href="generate.html">Print marker sheets</a>
     <div class="err" id="err" hidden></div>
   </div>
 </div>
@@ -171,6 +174,7 @@
     <input id="genId" type="number" min="0" value="0" inputmode="numeric" aria-label="Marker ID">
     <button id="genPrev" aria-label="Previous ID">−</button>
     <button id="genNext" aria-label="Next ID">+</button>
+    <a class="print-link" href="generate.html">Print sheet</a>
     <button class="done" id="genClose">Done</button>
   </header>
   <div class="body"><div><div id="markerSvg"></div><div id="markerCaption"></div></div></div>
