@@ -73,8 +73,13 @@ function getDetector(key) {
     AR.DICTIONARIES[key] = { nBits: src.nBits, tau: 1, codeList: src.codeList.slice(0, count) };
   }
   const det = new AR.Detector({ dictionaryName: key });
-  const n = Math.sqrt(det.dictionary.nBits);
-  det.correctable = Math.max(0, Math.floor((minDistance(det.dictionary.codeList, n) - 1) / 2));
+  det.key = key;
+  // How many wrong bits can be corrected; worked out on first use (it compares every pair
+  // of codes, which Auto, never correcting, does not need for its nine sets).
+  let correctable = null;
+  Object.defineProperty(det, 'correctable', {
+    get: () => correctable ?? (correctable = Math.max(0, Math.floor((minDistance(det.dictionary.codeList, Math.sqrt(det.dictionary.nBits)) - 1) / 2))),
+  });
   det.pass = 0;
   det.misses = 0;
   detectors[key] = det;
@@ -87,7 +92,9 @@ const CELL = 8;
 const MARGIN = 2;
 const MIN_CONTRAST = 45; // grey levels between darkest and brightest pixel in the candidate
 
-function decode(det, candidate, maxErrors, verifying = false) {
+// The candidate's cells as a bit grid (black border excluded), or null when it is not
+// clean enough to be a marker.
+function readBits(det, candidate, maxErrors, verifying = false) {
   const n = det.dictionary.markSize; // cells across, black border included
   const size = n * CELL;
   if (det.homography.data.length !== size * size) det.homography = new CV.Image(size, size, new Uint8Array(size * size));
@@ -139,7 +146,11 @@ function decode(det, candidate, maxErrors, verifying = false) {
   const blurAllowance = Math.max(1, Math.floor(det.dictionary.nBits / (verifying ? 4 : 8)));
   if (unsure > blurAllowance + maxErrors) return null;
   if (ones === 0) return null; // an all-black square is not a tag
+  return bits;
+}
 
+// The code in `bits` (any of four turns) in det's set, or null.
+function match(det, candidate, bits, maxErrors) {
   let best = null, rot = 0, cur = bits;
   for (let r = 0; r < 4; r++) {
     const f = det.dictionary.find(cur);
@@ -150,7 +161,36 @@ function decode(det, candidate, maxErrors, verifying = false) {
     cur = det.rotate(cur);
   }
   if (!best) return null;
-  return { id: best.id, corners: det.rotate2(candidate, 4 - rot), err: best.distance };
+  return { id: best.id, corners: det.rotate2(candidate, 4 - rot), err: best.distance, set: det.key };
+}
+
+function decode(det, candidate, maxErrors, verifying = false) {
+  const bits = readBits(det, candidate, maxErrors, verifying);
+  return bits && match(det, candidate, bits, maxErrors);
+}
+
+// Auto: every marker type at its largest size. A candidate's cells are read once per grid
+// size and matched against each set of that size; every match is reported, and the page
+// works out from many reads which type is really in view.
+const AUTO = 'auto';
+const autoKeys = () => MARKER_FAMILIES.map((f) => setKeyOf(f, f.sizes ? f.sizes[f.sizes.length - 1] : null));
+function decodeAny(dets, candidate) {
+  const bySize = new Map();
+  let first = null;
+  const alts = [];
+  for (const d of dets) {
+    const n = d.dictionary.markSize;
+    if (!bySize.has(n)) bySize.set(n, readBits(d, candidate, 0));
+    const bits = bySize.get(n);
+    if (!bits) continue;
+    d.dictionary.tau = 1;
+    const m = match(d, candidate, bits, 0);
+    if (!m) continue;
+    if (!first) first = m;
+    alts.push([m.set, m.id]);
+  }
+  if (first) first.alts = alts;
+  return first;
 }
 
 // Reject quads that are tiny or very skewed: they decode badly and cause most false reads.
@@ -307,33 +347,36 @@ function verifyExpected(det, expect, found, w, h) {
     const xs = e.corners.map((c) => c[0]), ys = e.corners.map((c) => c[1]);
     const cx = (xs[0] + xs[1] + xs[2] + xs[3]) / 4, cy = (ys[0] + ys[1] + ys[2] + ys[3]) / 4;
     const size = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
-    if (found.some((m) => m.id === e.id && Math.hypot(m.cx - cx, m.cy - cy) < size)) continue;
+    if (found.some((m) => m.id === e.id && (!e.set || m.set === e.set) && Math.hypot(m.cx - cx, m.cy - cy) < size)) continue;
     if (++rechecks > MAX_RECHECKS) break;
     const pad = Math.max(12, size * 0.45);
     const x0 = Math.max(0, Math.floor(Math.min(...xs) - pad)), y0 = Math.max(0, Math.floor(Math.min(...ys) - pad));
     const x1 = Math.min(w, Math.ceil(Math.max(...xs) + pad)), y1 = Math.min(h, Math.ceil(Math.max(...ys) + pad));
     const rw = x1 - x0, rh = y1 - y0;
     if (rw < 16 || rh < 16) continue;
+    // In Auto each expected tag is checked against its own set, without correction.
+    const d = e.set ? getDetector(e.set) : det;
+    const maxErrors = e.set ? 0 : d.correctable;
     // Copy the crop of the scan's grayscale into the small working set.
     const full = scanBuf.gray;
     buf = roiBuf;
     ensureBuffers(rw, rh);
     for (let y = 0; y < rh; y++) buf.gray.set(full.subarray((y0 + y) * w + x0, (y0 + y) * w + x0 + rw), y * rw);
-    const grey = det.grey;
-    det.grey = new CV.Image(rw, rh, buf.gray);
-    det.dictionary.tau = det.correctable + 1;
+    const grey = d.grey;
+    d.grey = new CV.Image(rw, rh, buf.gray);
+    d.dictionary.tau = maxErrors + 1;
     let hit = null;
     for (const p of VERIFY_PASSES) {
       adaptiveThreshold(p.kernel, p.thresh);
-      let cands = det.findCandidates(findContours(8), 8, 0.05, 8);
-      cands = det.clockwiseCorners(cands).filter(plausible);
+      let cands = d.findCandidates(findContours(8), 8, 0.05, 8);
+      cands = d.clockwiseCorners(cands).filter(plausible);
       for (const c of cands) {
-        const m = decode(det, c, det.correctable, true);
+        const m = decode(d, c, maxErrors, true);
         if (m && m.id === e.id) { hit = m; break; }
       }
       if (hit) break;
     }
-    det.grey = grey;
+    d.grey = grey;
     buf = scanBuf;
     if (hit) {
       hit.corners = hit.corners.map((c) => ({ x: c.x + x0, y: c.y + y0 }));
@@ -346,7 +389,7 @@ function verifyExpected(det, expect, found, w, h) {
   return out;
 }
 
-function detect(det, rgba, w, h, maxErrors, timings) {
+function detect(det, rgba, w, h, maxErrors, timings, autoDets = null) {
   const p = PASSES[det.pass];
   let t = performance.now();
   const lap = (k) => { if (timings) { const n = performance.now(); timings[k] = (timings[k] || 0) + n - t; t = n; } };
@@ -361,9 +404,10 @@ function detect(det, rgba, w, h, maxErrors, timings) {
   if (det.grey.data !== buf.gray) det.grey = new CV.Image(w, h, buf.gray);
   det.grey.width = w; det.grey.height = h;
   det.dictionary.tau = maxErrors + 1; // dictionary.find accepts distance < tau
+  if (autoDets) for (const d of autoDets) d.grey = det.grey;
   const out = [];
   for (const c of cands) {
-    const m = decode(det, c, maxErrors);
+    const m = autoDets ? decodeAny(autoDets, c) : decode(det, c, maxErrors);
     if (!m) continue;
     // One physical tag can yield nested contours; keep one read per tag, but allow
     // several printed copies of the same ID in view.
@@ -375,8 +419,8 @@ function detect(det, rgba, w, h, maxErrors, timings) {
   return out;
 }
 
-function detectAndVerify(det, rgba, w, h, maxErrors, expect, timings) {
-  const found = detect(det, rgba, w, h, maxErrors, timings);
+function detectAndVerify(det, rgba, w, h, maxErrors, expect, timings, autoDets) {
+  const found = detect(det, rgba, w, h, maxErrors, timings, autoDets);
   if (expect?.length) {
     const t = performance.now();
     found.push(...verifyExpected(det, expect, found, w, h));
@@ -404,7 +448,7 @@ onmessage = (e) => {
   const { width, height, buffer, bitmap, crop, dict, roi, correct, seq, profile, expect } = e.data;
   if (e.data.warm) {
     // Load the marker set and compute its error budget before the first frame needs it.
-    try { getDetector(e.data.warm); } catch {}
+    try { for (const k of e.data.warm === AUTO ? autoKeys() : [e.data.warm]) getDetector(k); } catch {}
     postMessage({ warm: true });
     return;
   }
@@ -423,9 +467,24 @@ onmessage = (e) => {
   try {
     const rgba = bitmap ? pixelsFromBitmap(bitmap, crop, width, height) : new Uint8ClampedArray(buffer);
     if (timings) timings.readout = performance.now() - t0;
-    const det = getDetector(dict);
-    const maxErrors = correct ? det.correctable : 0;
-    const found = detectAndVerify(det, rgba, width, height, maxErrors, expect, timings);
+    const autoDets = dict === AUTO ? autoKeys().map(getDetector) : null;
+    const det = autoDets ? autoDets[0] : getDetector(dict);
+    const maxErrors = correct && !autoDets ? det.correctable : 0;
+    let found;
+    if (e.data.still) {
+      // A photo: one chance, so try every threshold setting and merge what they find.
+      found = [];
+      for (let p = 0; p < PASSES.length; p++) {
+        det.pass = p;
+        for (const m of detect(det, rgba, width, height, maxErrors, null, autoDets)) {
+          const r = Math.hypot(m.corners[0].x - m.corners[2].x, m.corners[0].y - m.corners[2].y) / 2;
+          if (!found.some((o) => o.id === m.id && o.set === m.set && Math.hypot(o.cx - m.cx, o.cy - m.cy) < r)) found.push(m);
+        }
+      }
+      det.pass = 0;
+    } else {
+      found = detectAndVerify(det, rgba, width, height, maxErrors, expect, timings, autoDets);
+    }
     // Stick with a threshold setting while it works; rotate through the others when it doesn't.
     if (found.length) det.misses = 0;
     else if (++det.misses >= 2) { det.pass = (det.pass + 1) % PASSES.length; det.misses = 0; }
@@ -435,6 +494,8 @@ onmessage = (e) => {
       corners: m.corners.map((c) => [c.x / s + ox, c.y / s + oy]),
       err: m.err,
       verified: !!m.verified,
+      set: autoDets ? m.set : undefined,
+      alts: m.alts,
     }));
   } catch (err) {
     error = String(err);

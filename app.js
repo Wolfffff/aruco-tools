@@ -261,6 +261,11 @@ const store = {
 
 const state = {
   family: MARKER_FAMILIES.find((f) => f.key === store.get('family')) || MARKER_FAMILIES[0],
+  // Auto: look for every marker type until one is clearly in view, then switch to it.
+  // The default until a type has been chosen or found.
+  auto: !store.get('family') || store.get('family') === 'auto',
+  votes: new Map(), // Auto: set key -> confirmed reads
+  seenIn: new Map(), // Auto: id -> the set keys it was read in
   size: +(store.get('size') || 50),
   res: SPEED_OPTIONS.some(([v]) => String(v) === store.get('speed')) ? +store.get('speed') : 960,
   cam: store.get('cam') === '4k' ? '4k' : '1080',
@@ -289,6 +294,7 @@ if (state.family.sizes && !state.family.sizes.includes(state.size)) state.size =
 
 const setKey = (f = state.family, size = state.size) => setKeyOf(f, size);
 const setLabel = (f = state.family, size = state.size) => setNameOf(f, size);
+const scanKey = () => (state.auto ? 'auto' : setKey()); // what the workers look for
 
 // Same ID always gets the same colour, so you can follow a tag across frames.
 const hue = (id) => (id * 137.508 + 200) % 360;
@@ -621,7 +627,7 @@ function replaceWorker(w) {
   if (i < 0) return;
   w.terminate();
   workers[i] = makeWorker();
-  workers[i].postMessage({ warm: setKey() });
+  workers[i].postMessage({ warm: scanKey() });
 }
 const STUCK_MS = 3000; // a frame takes tens of milliseconds; this long means the worker is gone
 const workers = Array.from({ length: cores <= 1 ? 1 : cores >= 8 ? 4 : 3 }, makeWorker);
@@ -725,9 +731,9 @@ function sendFrame(src, vw, vh) {
     if (t.hits < CONFIRM_HITS || state.passNo - t.pass > RECHECK_PASSES) continue;
     const c = shifted(t).map((p) => [(p[0] - r.x) * scale, (p[1] - r.y) * scale]);
     const [mx, my] = centroid(c);
-    if (mx >= 0 && my >= 0 && mx < w && my < h) expect.push({ id: t.id, corners: c });
+    if (mx >= 0 && my >= 0 && mx < w && my < h) expect.push({ id: t.id, corners: c, set: t.set });
   }
-  const msg = { width: w, height: h, dict: setKey(), roi: { x: r.x, y: r.y, scale }, correct: state.correct, seq, expect };
+  const msg = { width: w, height: h, dict: scanKey(), roi: { x: r.x, y: r.y, scale }, correct: state.correct, seq, expect };
   worker.busy = true;
   worker.busySince = now;
   if (isBitmap) {
@@ -816,7 +822,7 @@ function addRead(m, ref) {
   const reach = Math.max(24, sideLen(m.corners));
   let best = null, bestD = Infinity;
   for (const t of state.tracks) {
-    if (t.id !== m.id || t.pass === state.passNo) continue;
+    if (t.id !== m.id || t.set !== m.set || t.pass === state.passNo) continue;
     const [tx, ty] = centroid(shifted(t, ref));
     const d = Math.hypot(tx - cx, ty - cy);
     if (d < reach && d < bestD) { best = t; bestD = d; }
@@ -836,10 +842,51 @@ function addRead(m, ref) {
     best.at = now;
     best.hits++;
     if (best.hits === CONFIRM_HITS) best.confirmedTime = now;
-    if (best.hits >= CONFIRM_HITS) markSeen(m.id);
+    if (best.hits >= CONFIRM_HITS) {
+      markSeen(m.id);
+      if (state.auto && m.alts) {
+        if (!state.seenIn.has(m.id)) state.seenIn.set(m.id, new Set());
+        state.seenIn.get(m.id).add(m.set);
+        vote(m.alts.map(([k]) => k));
+      }
+    }
   } else if (!m.verified) {
-    state.tracks.push({ id: m.id, corners: m.corners, ref, pass: state.passNo, at: performance.now(), hits: 1 });
+    state.tracks.push({ id: m.id, set: m.set, corners: m.corners, ref, pass: state.passNo, at: performance.now(), hits: 1 });
   }
+}
+
+// Auto: every confirmed read votes for each set its code belongs to. Once one set has
+// enough reads and clearly leads, switch to it, at the smallest size that holds every ID
+// read in it (OpenCV's 50/100/250 sets are the first codes of the 1000 set).
+const LOCK_VOTES = 8;
+function vote(sets) {
+  for (const k of sets) state.votes.set(k, (state.votes.get(k) || 0) + 1);
+  const [lead, second = ['', 0]] = [...state.votes].sort((a, b) => b[1] - a[1]);
+  if (lead[1] < LOCK_VOTES || lead[1] < 2 * second[1]) return;
+  const family = MARKER_FAMILIES.find((f) => f.base === lead[0].split(':')[0]);
+  const maxId = Math.max(...state.tracks.filter((t) => t.set === lead[0] && t.hits >= CONFIRM_HITS).map((t) => t.id));
+  const size = family.sizes ? family.sizes.find((n) => n > maxId) ?? family.sizes.at(-1) : null;
+  // Keep the tags of the found set (on screen and in the list), drop the rest: a code of
+  // one set can also be a code of another, under a different ID.
+  state.tracks = state.tracks.filter((t) => t.set === lead[0]);
+  for (const t of state.tracks) t.set = undefined;
+  for (const id of [...state.seen.keys()]) {
+    if (state.seenIn.get(id)?.has(lead[0])) continue;
+    state.seen.delete(id); state.seenTimes.delete(id); state.entered.delete(id); lastSeenAt.delete(id);
+  }
+  state.seenIn.clear();
+  state.auto = false;
+  state.votes.clear();
+  state.family = family;
+  if (size) state.size = size;
+  store.set('family', family.key);
+  if (size) store.set('size', String(size));
+  warmWorkers();
+  dropInFlight();
+  for (const el of cards.values()) el.mini.replaceChildren(); // redraw in the found set
+  seenDirty = true;
+  renderSettings();
+  notify(`Found ${family.label} markers · ${setLabel()}`);
 }
 
 let seenDirty = true;
@@ -988,60 +1035,60 @@ function brackets(q, len) {
 }
 
 
-function drawBox(id, q, alpha, dpr) {
-  octx.globalAlpha = alpha;
-  octx.lineJoin = 'round';
+function drawBox(id, q, alpha, dpr, ctx = octx) {
+  ctx.globalAlpha = alpha;
+  ctx.lineJoin = 'round';
   // One clean outline in the tag's colour, with a faint tint and a soft shadow for contrast.
-  octx.beginPath();
-  octx.moveTo(q[0][0], q[0][1]);
-  for (let i = 1; i < 4; i++) octx.lineTo(q[i][0], q[i][1]);
-  octx.closePath();
-  octx.fillStyle = color(id, 0.14);
-  octx.fill();
-  octx.shadowColor = 'rgba(0,0,0,0.45)';
-  octx.shadowBlur = 6 * dpr;
-  octx.strokeStyle = color(id);
-  octx.lineWidth = 2.5 * dpr;
-  octx.stroke();
-  octx.shadowBlur = 0;
-  octx.globalAlpha = 1;
+  ctx.beginPath();
+  ctx.moveTo(q[0][0], q[0][1]);
+  for (let i = 1; i < 4; i++) ctx.lineTo(q[i][0], q[i][1]);
+  ctx.closePath();
+  ctx.fillStyle = color(id, 0.14);
+  ctx.fill();
+  ctx.shadowColor = 'rgba(0,0,0,0.45)';
+  ctx.shadowBlur = 6 * dpr;
+  ctx.strokeStyle = color(id);
+  ctx.lineWidth = 2.5 * dpr;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
 }
 
 // ID label centred above the tag. Anchored to the tag's centre and top edge, which move
 // smoothly as it turns (a corner-anchored label jumps whenever another corner becomes
 // the highest). Size steps in 2 px increments so it does not jitter with the tag.
-function drawLabel(id, q, alpha, dpr) {
+function drawLabel(id, q, alpha, dpr, ctx = octx) {
   const step = 2 * dpr;
   const fs = Math.max(12 * dpr, Math.min(20 * dpr, Math.round((sideLen(q) * 0.2) / step) * step));
-  octx.globalAlpha = alpha;
-  octx.font = `600 ${fs}px Geist, -apple-system, system-ui, sans-serif`;
+  ctx.globalAlpha = alpha;
+  ctx.font = `600 ${fs}px Geist, -apple-system, system-ui, sans-serif`;
   const label = String(id);
-  const tw = octx.measureText(label).width;
+  const tw = ctx.measureText(label).width;
   const lx = centroid(q)[0];
   const top = Math.min(q[0][1], q[1][1], q[2][1], q[3][1]);
   const h = fs * 1.5, w = Math.max(h, tw + fs * 0.9);
   const ly = Math.max(h / 2 + 2 * dpr, top - h / 2 - 6 * dpr);
-  octx.shadowColor = 'rgba(0,0,0,0.35)';
-  octx.shadowBlur = 4 * dpr;
-  octx.fillStyle = color(id);
-  roundRect(lx - w / 2, ly - h / 2, w, h, h / 2);
-  octx.fill();
-  octx.shadowBlur = 0;
-  octx.fillStyle = '#000';
-  octx.textAlign = 'center';
-  octx.textBaseline = 'middle';
-  octx.fillText(label, lx, ly + fs * 0.05);
-  octx.globalAlpha = 1;
+  ctx.shadowColor = 'rgba(0,0,0,0.35)';
+  ctx.shadowBlur = 4 * dpr;
+  ctx.fillStyle = color(id);
+  roundRect(lx - w / 2, ly - h / 2, w, h, h / 2, ctx);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#000';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, lx, ly + fs * 0.05);
+  ctx.globalAlpha = 1;
 }
 
-function roundRect(x, y, w, h, r) {
-  octx.beginPath();
-  octx.moveTo(x + r, y);
-  octx.arcTo(x + w, y, x + w, y + h, r);
-  octx.arcTo(x + w, y + h, x, y + h, r);
-  octx.arcTo(x, y + h, x, y, r);
-  octx.arcTo(x, y, x + w, y, r);
-  octx.closePath();
+function roundRect(x, y, w, h, r, ctx = octx) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
 }
 
 /* ---------- readouts ---------- */
@@ -1171,19 +1218,23 @@ function options(el, list, current, onPick) {
 }
 
 function renderSettings() {
-  options($('family'), MARKER_FAMILIES.map((f) => [f, f.label]), state.family, (f) => {
-    state.family = f;
-    if (f.sizes && !f.sizes.includes(state.size)) state.size = f.sizes[0];
+  const AUTO = { key: 'auto', label: 'Auto' };
+  options($('family'), [AUTO, ...MARKER_FAMILIES].map((f) => [f, f.label]), state.auto ? AUTO : state.family, (f) => {
+    state.auto = f === AUTO;
+    if (!state.auto) {
+      state.family = f;
+      if (f.sizes && !f.sizes.includes(state.size)) state.size = f.sizes[0];
+    }
     store.set('family', f.key);
     resetReads();
   });
-  $('sizeGroup').hidden = !state.family.sizes;
+  $('sizeGroup').hidden = state.auto || !state.family.sizes;
   options($('size'), (state.family.sizes || []).map((n) => [n, String(n)]), state.size, (n) => {
     state.size = n;
     store.set('size', String(n));
     resetReads();
   });
-  $('dictName').textContent = `OpenCV: ${setLabel()}`;
+  $('dictName').textContent = state.auto ? 'Finds the marker type, then switches to it.' : `OpenCV: ${setLabel()}`;
   options($('speedOpts'), SPEED_OPTIONS, state.res, (v) => { state.res = v; store.set('speed', String(v)); });
   options($('camOpts'), CAMERA_OPTIONS, state.cam, (v) => {
     if (v === state.cam || state.switching) return;
@@ -1210,16 +1261,18 @@ function renderSettings() {
     $('stat').hidden = !v || $('top').hidden;
   });
   $('build').textContent = `Build ${BUILD.replace('?v=', '')}`;
-  $('setName').textContent = state.family.label + (state.family.sizes ? ` · ${state.size} IDs` : '');
+  $('setName').textContent = state.auto ? 'Auto' : state.family.label + (state.family.sizes ? ` · ${state.size} IDs` : '');
 }
 
 // Have every worker load the current marker set now, not on the first camera frame.
 function warmWorkers() {
-  for (const w of workers) w.postMessage({ warm: setKey() });
+  for (const w of workers) w.postMessage({ warm: scanKey() });
 }
 
 function resetReads() {
   warmWorkers();
+  state.votes.clear();
+  state.seenIn.clear();
   dropInFlight();
   state.tracks = [];
   state.entered.clear();
@@ -1242,7 +1295,11 @@ function closeSettings() {
   $('settings').hidden = true;
   $('settingsBtn').focus({ preventScroll: true });
 }
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSettings(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (!$('photo').hidden) $('photoClose').click();
+  else closeSettings();
+});
 
 /* ---------- controls ---------- */
 
@@ -1301,7 +1358,7 @@ $('copy').onclick = async (e) => {
 $('export').onclick = async (e) => {
   const btn = e.currentTarget;
   const ids = [...state.seen.keys()].sort((a, b) => a - b);
-  const set = setLabel();
+  const set = state.auto ? 'auto' : setLabel();
   const iso = (ms) => new Date(ms).toISOString();
   const rows = ids.map((id) => {
     const t = state.seenTimes.get(id);
@@ -1317,7 +1374,7 @@ $('export').onclick = async (e) => {
       const name = `aruco-${set.toLowerCase()}-${stamp}.csv`;
       const file = new File([csv], name, { type: 'text/csv' });
       // Touch phones get the share sheet (save to Files, AirDrop); desktops download directly.
-      if (navigator.canShare?.({ files: [file] }) && !matchMedia('(hover: hover) and (pointer: fine)').matches) {
+      if (!desktop && navigator.canShare?.({ files: [file] })) {
         await navigator.share({ files: [file] });
       } else {
         const url = URL.createObjectURL(file);
@@ -1371,6 +1428,112 @@ genSet.onchange = renderMarker;
 $('genId').oninput = renderMarker;
 $('genPrev').onclick = () => { $('genId').value = (+$('genId').value || 0) - 1; renderMarker(); };
 $('genNext').onclick = () => { $('genId').value = (+$('genId').value || 0) + 1; renderMarker(); };
+
+/* ---------- scan a photo ---------- */
+
+// Reads the markers in a picture from the photo library or a file, at up to PHOTO_MAX
+// pixels on its long side. The camera pauses meanwhile.
+const PHOTO_MAX = 2400;
+let photo = null; // { bitmap, markers, text }
+let photoPausedCamera = false;
+
+function pickPhoto() {
+  $('photoFile').value = '';
+  $('photoFile').click();
+}
+$('scanPhoto').onclick = () => { closeSettings(); pickPhoto(); };
+$('gatePhoto').onclick = pickPhoto;
+$('photoAgain').onclick = pickPhoto;
+$('photoFile').onchange = () => { if ($('photoFile').files[0]) scanPhoto($('photoFile').files[0]); };
+$('photoClose').onclick = () => {
+  $('photo').hidden = true;
+  photo?.bitmap.close();
+  photo = null;
+  if (photoPausedCamera) setFrozen(false);
+  photoPausedCamera = false;
+};
+$('photoCopy').onclick = async (e) => {
+  const btn = e.currentTarget;
+  try { await navigator.clipboard.writeText(photo.text); btn.textContent = 'Copied'; } catch { btn.textContent = 'Copy failed'; }
+  setTimeout(() => (btn.textContent = 'Copy IDs'), 1400);
+};
+addEventListener('resize', () => { if (photo) drawPhoto(); });
+
+async function scanPhoto(file) {
+  if ($('photo').hidden && state.track && !state.paused) { setFrozen(true); photoPausedCamera = true; }
+  $('photo').hidden = false;
+  $('photoIds').textContent = '';
+  $('photoResult').textContent = 'Reading…';
+  $('photoCopy').hidden = true;
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    $('photoResult').textContent = 'This file could not be opened as a picture.';
+    return;
+  }
+  photo?.bitmap.close();
+  photo = { bitmap, markers: [], text: '' };
+  drawPhoto();
+  const s = Math.min(1, PHOTO_MAX / Math.max(bitmap.width, bitmap.height));
+  const w = Math.round(bitmap.width * s), h = Math.round(bitmap.height * s);
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(bitmap, 0, 0, w, h);
+  const px = x.getImageData(0, 0, w, h).data;
+  // Its own worker, so the live reader's workers and their ordering are left alone.
+  const read = (dict) => new Promise((resolve) => {
+    const worker = new Worker('worker.js' + BUILD);
+    const done = (r) => { worker.terminate(); resolve(r.markers || []); };
+    worker.onmessage = (e) => { if (!e.data.warm) done(e.data); };
+    worker.onerror = () => done({});
+    const copy = new Uint8ClampedArray(px);
+    worker.postMessage({ width: w, height: h, buffer: copy.buffer, dict, roi: { x: 0, y: 0, scale: s }, correct: state.correct, still: true }, [copy.buffer]);
+  });
+  let markers = await read(scanKey()), name = setLabel(), other = false;
+  // Nothing in the chosen set: look for any kind, and say which it was.
+  if (!markers.length && !state.auto) { markers = await read('auto'); other = markers.length > 0; }
+  if (photo?.bitmap !== bitmap) return; // another photo was picked meanwhile
+  if (state.auto || other) {
+    // The set most of the markers belong to; each marker takes its ID in that set.
+    const votes = new Map();
+    for (const m of markers) for (const [k] of m.alts || []) votes.set(k, (votes.get(k) || 0) + 1);
+    const lead = [...votes].sort((a, b) => b[1] - a[1])[0]?.[0];
+    markers = markers.filter((m) => m.alts?.some(([k]) => k === lead)).map((m) => ({ ...m, id: m.alts.find(([k]) => k === lead)[1] }));
+    if (lead) {
+      const family = MARKER_FAMILIES.find((f) => f.base === lead.split(':')[0]);
+      const maxId = Math.max(...markers.map((m) => m.id));
+      name = setNameOf(family, family.sizes ? family.sizes.find((n) => n > maxId) ?? family.sizes.at(-1) : null);
+    }
+  }
+  photo.markers = markers;
+  drawPhoto();
+  const ids = [...new Set(markers.map((m) => m.id))].sort((a, b) => a - b);
+  photo.text = `${name}: ${ids.join(', ')}`;
+  $('photoIds').textContent = ids.join(', ');
+  $('photoResult').textContent = ids.length
+    ? `${markers.length} marker${markers.length === 1 ? '' : 's'} · ${name}${other ? ` (the reader is set to ${setLabel()})` : ''}`
+    : 'No markers found. A sharper, closer or brighter photo helps.';
+  $('photoCopy').hidden = !ids.length;
+}
+
+// The photo fitted into the view, with its markers outlined like on the camera.
+function drawPhoto() {
+  const cv = $('photoCanvas');
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  const cw = Math.round(cv.clientWidth * dpr), ch = Math.round(cv.clientHeight * dpr);
+  if (!cw || !ch || !photo) return;
+  cv.width = cw; cv.height = ch;
+  const ctx = cv.getContext('2d');
+  const b = photo.bitmap;
+  const k = Math.min(cw / b.width, ch / b.height);
+  const ox = (cw - b.width * k) / 2, oy = (ch - b.height * k) / 2;
+  ctx.drawImage(b, ox, oy, b.width * k, b.height * k);
+  const shown = photo.markers.map((m) => ({ id: m.id, q: m.corners.map(([x, y]) => [ox + x * k, oy + y * k]) }));
+  for (const m of shown) drawBox(m.id, m.q, 1, dpr, ctx);
+  for (const m of shown) drawLabel(m.id, m.q, 1, dpr, ctx);
+}
 
 /* ---------- init ---------- */
 
