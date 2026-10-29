@@ -280,6 +280,7 @@ const state = {
   tracks: [], // { id, corners, pass, hits }
   passNo: 0, // detection results received
   seen: new Map(), // id -> frames read (confirmed only)
+  seenTimes: new Map(), // id -> { first, last } wall-clock ms, for the CSV export
   entered: new Map(), // id -> when it last came into view; orders the list, newest first
   detTimes: [],
   lastMs: 0,
@@ -849,6 +850,10 @@ function markSeen(id) {
     if (navigator.userActivation?.hasBeenActive ?? true) navigator.vibrate?.(12);
   }
   state.seen.set(id, (state.seen.get(id) || 0) + 1);
+  const now = Date.now();
+  const t = state.seenTimes.get(id);
+  if (t) t.last = now;
+  else state.seenTimes.set(id, { first: now, last: now });
 }
 
 // Every new camera frame: take one snapshot and use it for everything, so motion, the
@@ -1220,6 +1225,7 @@ function resetReads() {
   state.entered.clear();
   lastSeenAt.clear();
   state.seen.clear();
+  state.seenTimes.clear();
   seenDirty = true;
 }
 
@@ -1274,6 +1280,7 @@ $('torch').onclick = async (e) => {
 };
 $('clear').onclick = () => {
   state.seen.clear();
+  state.seenTimes.clear();
   state.entered.clear();
   lastSeenAt.clear();
   seenDirty = true;
@@ -1290,6 +1297,40 @@ $('copy').onclick = async (e) => {
     btn.textContent = text ? 'Copy failed' : 'Nothing to copy';
   }
   setTimeout(() => (btn.textContent = 'Copy IDs'), 1400);
+};
+$('export').onclick = async (e) => {
+  const btn = e.currentTarget;
+  const ids = [...state.seen.keys()].sort((a, b) => a - b);
+  const set = setLabel();
+  const iso = (ms) => new Date(ms).toISOString();
+  const rows = ids.map((id) => {
+    const t = state.seenTimes.get(id);
+    return `${id},${state.seen.get(id)},${iso(t.first)},${iso(t.last)},${set}`;
+  });
+  let label = 'Nothing to export';
+  if (rows.length) {
+    try {
+      const csv = ['id,reads,first_seen,last_seen,marker_set', ...rows].join('\n') + '\n';
+      const d = new Date();
+      const p = (n) => String(n).padStart(2, '0');
+      const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+      const name = `aruco-${set.toLowerCase()}-${stamp}.csv`;
+      const file = new File([csv], name, { type: 'text/csv' });
+      // Touch phones get the share sheet (save to Files, AirDrop); desktops download directly.
+      if (navigator.canShare?.({ files: [file] }) && !matchMedia('(hover: hover) and (pointer: fine)').matches) {
+        await navigator.share({ files: [file] });
+      } else {
+        const url = URL.createObjectURL(file);
+        Object.assign(document.createElement('a'), { href: url, download: name }).click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      label = 'Exported';
+    } catch (err) {
+      label = err?.name === 'AbortError' ? 'Export' : 'Export failed';
+    }
+  }
+  btn.textContent = label;
+  setTimeout(() => (btn.textContent = 'Export'), 1400);
 };
 
 /* ---------- marker display (to test from a second screen) ---------- */
