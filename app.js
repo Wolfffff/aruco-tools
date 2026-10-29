@@ -21,6 +21,12 @@ const AREA_OPTIONS = [['auto', 'Auto'], ['full', 'Whole frame'], ['center', 'Far
 // A tag is shown only after it is read twice at the same place, which removes nearly
 // all one-frame misreads of textures and text.
 const CONFIRM_HITS = 2;
+// After Auto picks a set it keeps looking through the whole family (its 1000 IDs) so a
+// higher ID still reads; one outside the picked set must be read this many times before
+// it counts, and the set then grows to hold it.
+const OUTSIDE_HITS = 4;
+const outside = (id) => state.grow && state.family.sizes && id >= state.size;
+const confirmed = (t) => t.hits >= (outside(t.id) ? OUTSIDE_HITS : CONFIRM_HITS);
 // A confirmed tag that a pass misses (motion blur, glare, a finger) is held: it moves with
 // the camera, so it stays on the tag, and it is looked for again around that spot. The hold
 // is a fixed time, not a number of passes, so it feels the same on fast and slow phones: it
@@ -264,6 +270,7 @@ const state = {
   // Auto: look for every marker type until one is clearly in view, then switch to it.
   // The default until a type has been chosen or found.
   auto: !store.get('family') || store.get('family') === 'auto',
+  grow: store.get('grow') === '1', // the set was picked by Auto and may grow (see OUTSIDE_HITS)
   votes: new Map(), // Auto: set key -> confirmed reads
   seenIn: new Map(), // Auto: id -> the set keys it was read in
   size: +(store.get('size') || 50),
@@ -294,7 +301,8 @@ if (state.family.sizes && !state.family.sizes.includes(state.size)) state.size =
 
 const setKey = (f = state.family, size = state.size) => setKeyOf(f, size);
 const setLabel = (f = state.family, size = state.size) => setNameOf(f, size);
-const scanKey = () => (state.auto ? 'auto' : setKey()); // what the workers look for
+// What the workers look for.
+const scanKey = () => (state.auto ? 'auto' : state.grow && state.family.sizes ? setKey(state.family, state.family.sizes.at(-1)) : setKey());
 
 // Same ID always gets the same colour, so you can follow a tag across frames.
 const hue = (id) => (id * 137.508 + 200) % 360;
@@ -668,7 +676,7 @@ function scanRect(vw, vh, center) {
 function focusRect(vw, vh) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, side = 0;
   for (const t of state.tracks) {
-    if (t.hits < CONFIRM_HITS || state.passNo - t.pass > RECHECK_PASSES) continue;
+    if (!confirmed(t) || state.passNo - t.pass > RECHECK_PASSES) continue;
     const q = shifted(t);
     side = Math.max(side, sideLen(q));
     for (const p of q) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
@@ -694,7 +702,7 @@ function chooseRegion(vw, vh) {
   const focus = passIndex % 2 === 0 ? focusRect(vw, vh) : null;
   if (focus) return { r: focus, cropped: true };
   wideIndex++;
-  const tracking = state.tracks.some((t) => t.hits >= CONFIRM_HITS);
+  const tracking = state.tracks.some(confirmed);
   const center = state.area === 'center' || (state.area === 'auto' && wideIndex % (tracking ? 3 : 2) === 0);
   return { r: scanRect(vw, vh, center), cropped: center || digitalZoom() > 1 };
 }
@@ -728,7 +736,7 @@ function sendFrame(src, vw, vh) {
   // can re-check those spots if its full scan misses them.
   const expect = [];
   for (const t of state.tracks) {
-    if (t.hits < CONFIRM_HITS || state.passNo - t.pass > RECHECK_PASSES) continue;
+    if (!confirmed(t) || state.passNo - t.pass > RECHECK_PASSES) continue;
     const c = shifted(t).map((p) => [(p[0] - r.x) * scale, (p[1] - r.y) * scale]);
     const [mx, my] = centroid(c);
     if (mx >= 0 && my >= 0 && mx < w && my < h) expect.push({ id: t.id, corners: c, set: t.set });
@@ -786,7 +794,7 @@ function onResult(markers, ms, ref) {
   // Confirmed tags live through the hold. An unconfirmed read waits long enough to meet the
   // next whole-frame scan (passes rotate between focus, whole frame and centre), but not so
   // long that two chance misreads far apart in time could add up to a confirmation.
-  state.tracks = state.tracks.filter((t) => (t.hits >= CONFIRM_HITS
+  state.tracks = state.tracks.filter((t) => (confirmed(t)
     ? isHeld(t, now) || state.passNo - t.pass <= RECHECK_PASSES
     : state.passNo - t.pass <= 4 || now - t.at <= 300));
   state.lastMs = ms;
@@ -799,7 +807,7 @@ function onResult(markers, ms, ref) {
 // Confirmed tags that belong on screen now.
 function visibleTracks() {
   const now = performance.now();
-  return state.tracks.filter((t) => t.hits >= CONFIRM_HITS
+  return state.tracks.filter((t) => confirmed(t)
     && (t.pass === state.passNo || (isHeld(t, now) && onScreen(t))));
 }
 
@@ -841,8 +849,9 @@ function addRead(m, ref) {
     best.pass = state.passNo;
     best.at = now;
     best.hits++;
-    if (best.hits === CONFIRM_HITS) best.confirmedTime = now;
-    if (best.hits >= CONFIRM_HITS) {
+    if (confirmed(best)) {
+      best.confirmedTime ??= now;
+      if (outside(m.id)) growTo(m.id);
       markSeen(m.id);
       if (state.auto && m.alts) {
         if (!state.seenIn.has(m.id)) state.seenIn.set(m.id, new Set());
@@ -855,6 +864,14 @@ function addRead(m, ref) {
   }
 }
 
+// A set Auto picked grows to the smallest size holding a newly confirmed higher ID.
+function growTo(id) {
+  state.size = state.family.sizes.find((n) => n > id) ?? state.family.sizes.at(-1);
+  store.set('size', String(state.size));
+  renderSettings();
+  notify(`Read ID ${id} · now ${setLabel()}`);
+}
+
 // Auto: every confirmed read votes for each set its code belongs to. Once one set has
 // enough reads and clearly leads, switch to it, at the smallest size that holds every ID
 // read in it (OpenCV's 50/100/250 sets are the first codes of the 1000 set).
@@ -864,7 +881,7 @@ function vote(sets) {
   const [lead, second = ['', 0]] = [...state.votes].sort((a, b) => b[1] - a[1]);
   if (lead[1] < LOCK_VOTES || lead[1] < 2 * second[1]) return;
   const family = MARKER_FAMILIES.find((f) => f.base === lead[0].split(':')[0]);
-  const maxId = Math.max(...state.tracks.filter((t) => t.set === lead[0] && t.hits >= CONFIRM_HITS).map((t) => t.id));
+  const maxId = Math.max(...state.tracks.filter((t) => t.set === lead[0] && confirmed(t)).map((t) => t.id));
   const size = family.sizes ? family.sizes.find((n) => n > maxId) ?? family.sizes.at(-1) : null;
   // Keep the tags of the found set (on screen and in the list), drop the rest: a code of
   // one set can also be a code of another, under a different ID.
@@ -879,8 +896,10 @@ function vote(sets) {
   state.votes.clear();
   state.family = family;
   if (size) state.size = size;
+  state.grow = true;
   store.set('family', family.key);
   if (size) store.set('size', String(size));
+  store.set('grow', '1');
   warmWorkers();
   dropInFlight();
   for (const el of cards.values()) el.mini.replaceChildren(); // redraw in the found set
@@ -1221,6 +1240,8 @@ function renderSettings() {
   const AUTO = { key: 'auto', label: 'Auto' };
   options($('family'), [AUTO, ...MARKER_FAMILIES].map((f) => [f, f.label]), state.auto ? AUTO : state.family, (f) => {
     state.auto = f === AUTO;
+    state.grow = false;
+    store.set('grow', '0');
     if (!state.auto) {
       state.family = f;
       if (f.sizes && !f.sizes.includes(state.size)) state.size = f.sizes[0];
@@ -1231,10 +1252,13 @@ function renderSettings() {
   $('sizeGroup').hidden = state.auto || !state.family.sizes;
   options($('size'), (state.family.sizes || []).map((n) => [n, String(n)]), state.size, (n) => {
     state.size = n;
+    state.grow = false;
     store.set('size', String(n));
+    store.set('grow', '0');
     resetReads();
   });
-  $('dictName').textContent = state.auto ? 'Finds the marker type, then switches to it.' : `OpenCV: ${setLabel()}`;
+  $('dictName').textContent = state.auto ? 'Finds the marker type, then switches to it.'
+    : `OpenCV: ${setLabel()}${state.grow && state.family.sizes ? ' · picked by Auto, grows for higher IDs' : ''}`;
   options($('speedOpts'), SPEED_OPTIONS, state.res, (v) => { state.res = v; store.set('speed', String(v)); });
   options($('camOpts'), CAMERA_OPTIONS, state.cam, (v) => {
     if (v === state.cam || state.switching) return;
@@ -1506,6 +1530,11 @@ async function scanPhoto(file) {
       const maxId = Math.max(...markers.map((m) => m.id));
       name = setNameOf(family, family.sizes ? family.sizes.find((n) => n > maxId) ?? family.sizes.at(-1) : null);
     }
+  }
+  // A set Auto picked reads its whole family; name the size that holds what was found.
+  if (!state.auto && !other && state.grow && state.family.sizes && markers.length) {
+    const maxId = Math.max(...markers.map((m) => m.id));
+    name = setLabel(state.family, state.family.sizes.find((n) => n > maxId) ?? state.family.sizes.at(-1));
   }
   photo.markers = markers;
   drawPhoto();
