@@ -7,7 +7,7 @@
 <title>Print Markers</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="ui.css?v=33">
+<link rel="stylesheet" href="ui.css?v=34">
 <style>
   /* Sheet generator. Shared tokens and components live in ui.css. The sheets are white
      paper (that is what gets printed) on the dark page. */
@@ -23,6 +23,11 @@
   input[type=number] { width: 88px; }
   input.ids { width: 160px; }
   .note { flex: 1 0 100%; margin: 0; font-size: 14px; }
+  .sect { flex: 1 0 100%; font: 600 13px var(--font); color: var(--fg); margin-top: 6px; }
+  .colour { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 10px; border: 1.5px solid var(--line); border-radius: var(--r-s); color: var(--fg); font: 500 14px var(--font); font-variant-numeric: tabular-nums; }
+  .colour input { width: 26px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; cursor: pointer; }
+  .colour input::-webkit-color-swatch-wrapper { padding: 0; }
+  .colour input::-webkit-color-swatch { border: 0; border-radius: 5px; }
   .note.warn { color: var(--alert); font-weight: 600; }
   /* On phones the controls fold into one line until "Edit" is tapped, so the sheet gets the screen. */
   .fold { display: none; }
@@ -41,10 +46,12 @@
       display: grid; grid-template-columns: 1fr 1fr; align-content: start; gap: 16px 12px;
       padding: 24px; border-bottom: 0; border-right: 1px solid var(--hair);
     }
-    .controls h1, .controls .wide, .controls .print, .controls .note { grid-column: 1 / -1; }
+    .controls h1, .controls .wide, .controls .print, .controls .note, .controls .sect { grid-column: 1 / -1; }
+    .controls .colour input { width: 26px; }
     .controls h1 { margin-bottom: 8px; }
     .controls select, .controls input, .controls input.ids, .controls input[type=number] { width: 100%; }
-    .controls .print { margin-top: 8px; }
+    /* Print stays in view at the bottom of the column while the settings scroll. */
+    .controls .print { position: sticky; bottom: 0; margin-top: 8px; box-shadow: 0 -16px 16px var(--bg); }
     .summary { padding: 24px 32px 0; }
     .pages { display: flex; flex-wrap: wrap; justify-content: center; align-content: start; gap: 24px; padding: 16px 32px 48px; }
   }
@@ -81,30 +88,38 @@
   <h1>Print markers <a class="btn line small" href="./">Reader</a></h1>
   <div class="fold"><span id="foldText"></span><button class="btn line small" id="foldBtn" aria-expanded="false" aria-controls="controls">Edit</button></div>
   <label class="wide">Set <select id="set"></select></label>
-  <label>Paper <select id="paper"><option value="a4">A4</option><option value="letter">Letter</option></select></label>
-  <label>Orientation <select id="orient"><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
-  <label>Size, mm <input id="size" type="number" min="10" max="250" value="50" inputmode="decimal"></label>
-  <label>IDs <select id="mode"><option value="fill">Fill pages</option><option value="list">List</option></select></label>
+  <h2 class="sect">Markers</h2>
+  <label>Size, mm <input id="size" type="number" min="5" max="250" value="50" step="any" inputmode="decimal" title="The black square, edge to edge"></label>
+  <label>White border <select id="quiet"><option value="1">1 cell</option><option value="2">2 cells</option><option value="3">3 cells</option><option value="4">4 cells</option></select></label>
+  <label>Ink <span class="colour"><input id="ink" type="color" value="#000000"><span id="inkHex">#000000</span></span></label>
+  <label>Background <span class="colour"><input id="bg" type="color" value="#ffffff"><span id="bgHex">#ffffff</span></span></label>
+  <label>Labels <select id="labels"><option value="full">Set and ID</option><option value="id">ID only</option><option value="off">Off</option></select></label>
+  <h2 class="sect">IDs</h2>
+  <label>Choose <select id="mode"><option value="fill">Fill pages</option><option value="list">List of IDs</option></select></label>
   <label data-mode="fill">From ID <input id="start" type="number" min="0" value="0" inputmode="numeric"></label>
   <label data-mode="fill">Pages <input id="pages" type="number" min="1" max="300" value="1" inputmode="numeric"></label>
   <label class="wide" data-mode="list" hidden>List <input id="ids" class="ids" value="0-11" placeholder="0-11, 20-24" inputmode="numeric"></label>
-  <label>Labels <select id="labels"><option value="1">On</option><option value="0">Off</option></select></label>
+  <h2 class="sect">Page</h2>
+  <label>Paper <select id="paper"><option value="a4">A4</option><option value="letter">Letter</option></select></label>
+  <label>Orientation <select id="orient"><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
+  <label>Spacing, mm <input id="gap" type="number" min="0" max="50" value="4" step="any" inputmode="decimal" title="Between neighbouring markers' white borders"></label>
+  <label>Margin, mm <input id="margin" type="number" min="0" max="40" value="10" step="any" inputmode="decimal" title="Around the edge of the page"></label>
   <label>Cut lines <select id="cuts"><option value="1">On</option><option value="0">Off</option></select></label>
-  <button class="btn ink print" id="print">Print</button>
-  <p class="note" id="hint">Print at 100%.</p>
   <p class="note warn" id="warn" hidden></p>
+  <p class="note" id="hint">Print at 100%.</p>
+  <button class="btn ink print" id="print">Print</button>
 </div>
 <p class="summary" id="summary"></p>
 <div class="pages" id="pages-out"></div>
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="markers.js?v=33"></script>
+<script src="markers.js?v=34"></script>
 <script>
 const SETS = MARKER_SETS.map((s) => ({ label: s.name, base: s.base, count: s.count }));
 const PAPERS = { a4: { name: 'A4', w: 210, h: 297 }, letter: { name: 'letter', w: 215.9, h: 279.4 } };
 // All layout numbers are millimetres.
-const MARGIN = 10, GAP = 4, FOOT = 6, LABEL = 4;
+const FOOT = 6, LABEL = 4;
 const MAX_MARKERS = 300;
 const $ = (id) => document.getElementById(id);
 const setSel = $('set');
@@ -138,45 +153,73 @@ function parseIds(text, max) {
   return { ids, skipped, capped };
 }
 
-// Grid for one page. Each marker gets an equal slot; slots are at least GAP wider/taller than the
-// marker (quiet zone and label included), so neighbours are >= GAP apart and cut lines fall on slot edges.
-function layout(paper, landscape, mm, n, labels) {
+// Grid for one page. Each marker gets an equal slot; slots are at least `gap` wider/taller than
+// the marker (white border and label included), so neighbours are >= gap apart and cut lines
+// fall on slot edges. `mm` is the black square; `n` its cells, black edge included.
+function layout(paper, landscape, mm, n, o) {
   const W = landscape ? paper.h : paper.w, H = landscape ? paper.w : paper.h;
-  const availW = W - 2 * MARGIN, availH = H - 2 * MARGIN - FOOT;
-  const labH = labels ? LABEL : 0;
-  const k = (n + 2) / n; // generateSVG adds one white cell each side of the n-cell black square
-  const fitMm = Math.floor(Math.min((availW - GAP) / k, (availH - GAP - labH) / k));
+  const availW = W - 2 * o.margin, availH = H - 2 * o.margin - FOOT;
+  const labH = o.labels !== 'off' ? LABEL : 0;
+  const k = (n + 2 * o.quiet) / n;
+  const fitMm = Math.floor(Math.min((availW - o.gap) / k, (availH - o.gap - labH) / k) * 10) / 10;
   const size = Math.min(mm, fitMm);
   const markW = size * k;
-  const cols = Math.max(1, Math.floor(availW / (markW + GAP)));
-  const rows = Math.max(1, Math.floor(availH / (markW + labH + GAP)));
-  return { W, H, availH, mm: size, fitMm, markW, cols, rows, per: cols * rows, slotW: availW / cols, slotH: availH / rows };
+  const cols = Math.max(1, Math.floor((availW + 1e-6) / (markW + o.gap)));
+  const rows = Math.max(1, Math.floor((availH + 1e-6) / (markW + labH + o.gap)));
+  return { W, H, availH, mm: size, fitMm, markW, cols, rows, per: cols * rows, slotW: availW / cols, slotH: availH / rows, margin: o.margin };
+}
+
+// A marker as SVG: `quiet` cells of background around the black (ink) square, its code
+// cells in background colour. One path per colour, so it prints without hairline seams.
+function markerSvg(dict, id, quiet, ink, bg) {
+  const code = dict.codeList[id], n = dict.markSize - 2, t = n + 2 + 2 * quiet;
+  let d = '';
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
+      if (code[y * n + x] !== '1') continue;
+      let e = x;
+      while (e + 1 < n && code[y * n + e + 1] === '1') e++;
+      d += `M${x + quiet + 1} ${y + quiet + 1}h${e - x + 1}v1h${x - e - 1}z`;
+      x = e;
+    }
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${t} ${t}"><rect width="${t}" height="${t}" fill="${bg}"/>`
+    + `<rect x="${quiet}" y="${quiet}" width="${n + 2}" height="${n + 2}" fill="${ink}"/><path d="${d}" fill="${bg}"/></svg>`;
+}
+
+// Relative luminance (WCAG) of #rrggbb, for the contrast warning.
+function luminance(hex) {
+  const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
 }
 
 const f = (v) => +v.toFixed(3);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 function pageHtml(L, chunk, dict, set, opts, i, total) {
+  const M = L.margin;
   const svgSize = `width="${f(L.markW)}mm" height="${f(L.markW)}mm"`;
   let h = '';
   chunk.forEach((id, j) => {
     const c = j % L.cols, r = (j / L.cols) | 0;
-    h += `<div class="slot" style="left:${f(MARGIN + c * L.slotW)}mm;top:${f(MARGIN + r * L.slotH)}mm;width:${f(L.slotW)}mm;height:${f(L.slotH)}mm">`;
-    h += dict.generateSVG(id).replace('<svg ', `<svg ${svgSize} `);
-    if (opts.labels) {
-      // Full caption when it fits the slot (mono glyph ~0.6em of 2.6 mm), else just the ID.
+    h += `<div class="slot" style="left:${f(M + c * L.slotW)}mm;top:${f(M + r * L.slotH)}mm;width:${f(L.slotW)}mm;height:${f(L.slotH)}mm">`;
+    h += markerSvg(dict, id, opts.quiet, opts.ink, opts.bg).replace('<svg ', `<svg ${svgSize} `);
+    if (opts.labels !== 'off') {
+      // Set and ID when it fits the slot (a glyph is ~0.6em of 2.6 mm), else just the ID.
       const full = `${set.label} · ${id}`;
-      h += `<div class="cap">${esc(full.length * 1.6 < L.slotW - 1 ? full : id)}</div>`;
+      h += `<div class="cap">${esc(opts.labels === 'full' && full.length * 1.6 < L.slotW - 1 ? full : id)}</div>`;
     }
     h += '</div>';
   });
   if (opts.cuts) {
     const usedRows = Math.ceil(chunk.length / L.cols), usedCols = usedRows > 1 ? L.cols : chunk.length;
     const gw = usedCols * L.slotW, gh = usedRows * L.slotH;
-    for (let c = 0; c <= usedCols; c++) h += `<i class="cut v" style="left:${f(MARGIN + c * L.slotW - 0.1)}mm;top:${MARGIN}mm;height:${f(gh)}mm"></i>`;
-    for (let r = 0; r <= usedRows; r++) h += `<i class="cut h" style="left:${MARGIN}mm;top:${f(MARGIN + r * L.slotH - 0.1)}mm;width:${f(gw)}mm"></i>`;
+    for (let c = 0; c <= usedCols; c++) h += `<i class="cut v" style="left:${f(M + c * L.slotW - 0.1)}mm;top:${M}mm;height:${f(gh)}mm"></i>`;
+    for (let r = 0; r <= usedRows; r++) h += `<i class="cut h" style="left:${M}mm;top:${f(M + r * L.slotH - 0.1)}mm;width:${f(gw)}mm"></i>`;
   }
-  h += `<div class="foot" style="left:${MARGIN}mm;width:${f(L.W - 2 * MARGIN)}mm;top:${f(L.H - MARGIN - 4)}mm;height:4mm">`
+  // The footer sits in the margin's last 4 mm, or just inside the page edge when there is none.
+  const fy = Math.min(L.H - M - 4, L.H - 5);
+  h += `<div class="foot" style="left:${f(Math.max(M, 4))}mm;width:${f(L.W - 2 * Math.max(M, 4))}mm;top:${f(fy)}mm;height:4mm">`
     + `<span>${esc(set.label)} · ${L.mm} mm · page ${i + 1} of ${total}</span>`
     + `<span class="bar"><svg width="10mm" height="1.5mm" viewBox="0 0 10 1.5"><rect width="10" height="1.5" fill="#000"/></svg>10 mm</span></div>`;
   return `<div class="pagewrap"><div class="page">${h}</div></div>`;
@@ -205,10 +248,16 @@ async function render() {
   if (mine !== token) return; // a newer render started while the dictionary loaded
   const dict = drawingDictionary(set.base);
   const max = (set.count || dict.codeList.length) - 1;
-  const opts = { labels: $('labels').value === '1', cuts: $('cuts').value === '1' };
+  const num = (id, lo, hi, dflt) => { const v = parseFloat($(id).value); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : dflt; };
+  const opts = {
+    labels: $('labels').value, cuts: $('cuts').value === '1', quiet: +$('quiet').value,
+    ink: $('ink').value, bg: $('bg').value, gap: num('gap', 0, 50, 4), margin: num('margin', 0, 40, 10),
+  };
+  $('inkHex').textContent = opts.ink; $('bgHex').textContent = opts.bg;
   const paper = PAPERS[$('paper').value], landscape = $('orient').value === 'landscape';
-  const want = Math.max(10, Math.min(250, +$('size').value || 50));
-  const L = layout(paper, landscape, want, dict.markSize, opts.labels);
+  const want = num('size', 5, 250, 50);
+  const L = layout(paper, landscape, want, dict.markSize, opts);
+  save();
 
   let ids, warn = '';
   if (listMode) {
@@ -226,6 +275,10 @@ async function render() {
     else if (n < wantN) warn = n === MAX_MARKERS ? `Showing the first ${MAX_MARKERS} markers.` : `Stopped at ID ${max}, the last in ${set.label}.`;
   }
   if (want > L.fitMm) warn = `${want} mm does not fit on ${paper.name} ${landscape ? 'landscape' : 'portrait'}; using ${L.fitMm} mm. ` + warn;
+  // Readers threshold brightness: ink and background need a strong difference.
+  const [hi, lo] = [luminance(opts.ink), luminance(opts.bg)].sort((a, b) => b - a);
+  if ((hi + 0.05) / (lo + 0.05) < 4.5) warn = 'Low contrast between ink and background; markers may not read. Dark ink on a light background works best. ' + warn;
+  else if (luminance(opts.ink) > luminance(opts.bg)) warn = 'Light ink on a dark background is inverted; most readers (this one included) expect dark markers on a light background. ' + warn;
   showWarn(warn);
 
   $('pagerule').textContent = `@page { size: ${paper.name} ${landscape ? 'landscape' : 'portrait'}; margin: 0; }`;
@@ -237,7 +290,7 @@ async function render() {
   out.innerHTML = html; // one write, one layout
   fitScale();
   $('foldText').textContent = `${set.label} · ${$('paper').selectedOptions[0].text} · ${L.mm} mm`;
-  $('summary').textContent = `${ids.length} marker${ids.length === 1 ? '' : 's'} · ${total} page${total === 1 ? '' : 's'} · ${L.mm} mm · up to ${L.per} per page (${L.cols}×${L.rows})`;
+  $('summary').textContent = `${ids.length} marker${ids.length === 1 ? '' : 's'} · ${total} page${total === 1 ? '' : 's'} · ${L.mm} mm · ${+L.markW.toFixed(1)} mm with border · up to ${L.per} per page (${L.cols}×${L.rows})`;
   $('print').disabled = !ids.length;
 }
 function showWarn(text) {
@@ -251,7 +304,20 @@ function schedule() {
   queued = true;
   requestAnimationFrame(() => { queued = false; render(); });
 }
-for (const id of ['set', 'paper', 'orient', 'size', 'mode', 'start', 'pages', 'ids', 'labels', 'cuts']) $(id).addEventListener('input', schedule);
+// Every choice is remembered on this device, except which IDs to print.
+const KEEP = ['paper', 'orient', 'size', 'quiet', 'ink', 'bg', 'labels', 'cuts', 'gap', 'margin'];
+function save() {
+  try { localStorage.setItem('print', JSON.stringify(Object.fromEntries(KEEP.map((k) => [k, $(k).value])))); } catch {}
+}
+try {
+  const kept = JSON.parse(localStorage.getItem('print') || '{}');
+  for (const k of KEEP) {
+    if (kept[k] == null) continue;
+    const el = $(k);
+    if (el.tagName !== 'SELECT' || [...el.options].some((o) => o.value === kept[k])) el.value = kept[k];
+  }
+} catch {}
+for (const id of ['set', 'mode', 'start', 'pages', 'ids', ...KEEP]) $(id).addEventListener('input', schedule);
 addEventListener('resize', fitScale);
 $('foldBtn').onclick = () => {
   const folded = $('controls').classList.toggle('folded');
