@@ -7,7 +7,7 @@
 <title>Print Markers</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="ui.css?v=34">
+<link rel="stylesheet" href="ui.css?v=35">
 <style>
   /* Sheet generator. Shared tokens and components live in ui.css. The sheets are white
      paper (that is what gets printed) on the dark page. */
@@ -23,6 +23,7 @@
   input[type=number] { width: 88px; }
   input.ids { width: 160px; }
   .note { flex: 1 0 100%; margin: 0; font-size: 14px; }
+  .actions { flex: 1 0 100%; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; background: var(--bg); }
   .sect { flex: 1 0 100%; font: 600 13px var(--font); color: var(--fg); margin-top: 6px; }
   .colour { display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 10px; border: 1.5px solid var(--line); border-radius: var(--r-s); color: var(--fg); font: 500 14px var(--font); font-variant-numeric: tabular-nums; }
   .colour input { width: 26px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; cursor: pointer; }
@@ -34,7 +35,7 @@
   @media (max-width: 600px) {
     .fold { display: flex; align-items: center; gap: 10px; flex: 1 0 100%; }
     .fold span { flex: 1; min-width: 0; font: 500 15px var(--font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .controls.folded > :not(h1):not(.fold):not(.print):not(.warn) { display: none !important; }
+    .controls.folded > :not(h1):not(.fold):not(.actions):not(.warn) { display: none !important; }
     .controls { position: static; }
   }
   /* Wide screens: settings in a column on the left, pages side by side on the right, each
@@ -46,12 +47,12 @@
       display: grid; grid-template-columns: 1fr 1fr; align-content: start; gap: 16px 12px;
       padding: 24px; border-bottom: 0; border-right: 1px solid var(--hair);
     }
-    .controls h1, .controls .wide, .controls .print, .controls .note, .controls .sect { grid-column: 1 / -1; }
+    .controls h1, .controls .wide, .controls .print, .controls .note, .controls .sect, .controls .actions { grid-column: 1 / -1; }
     .controls .colour input { width: 26px; }
     .controls h1 { margin-bottom: 8px; }
     .controls select, .controls input, .controls input.ids, .controls input[type=number] { width: 100%; }
     /* Print stays in view at the bottom of the column while the settings scroll. */
-    .controls .print { position: sticky; bottom: 0; margin-top: 8px; box-shadow: 0 -16px 16px var(--bg); }
+    .controls .actions { position: sticky; bottom: 0; margin-top: 8px; box-shadow: 0 -16px 16px var(--bg); }
     .summary { padding: 24px 32px 0; }
     .pages { display: flex; flex-wrap: wrap; justify-content: center; align-content: start; gap: 24px; padding: 16px 32px 48px; }
   }
@@ -61,15 +62,7 @@
   .pages { display: grid; justify-items: center; gap: 16px; padding: 12px var(--sr) 40px var(--sl); }
   .pagewrap { width: calc(var(--pw) * var(--s, 1)); height: calc(var(--ph) * var(--s, 1)); }
   .page { position: relative; overflow: hidden; width: var(--pw); height: var(--ph); background: #fff; color: #000; transform: scale(var(--s, 1)); transform-origin: 0 0; }
-  .slot { position: absolute; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1mm; }
-  .slot svg { display: block; flex: none; shape-rendering: crispEdges; }
-  .cap { font: 500 2.6mm/3mm var(--font); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .cut { position: absolute; border: 0 dashed #bbb; }
-  .cut.v { width: 0; border-left-width: 0.2mm; }
-  .cut.h { height: 0; border-top-width: 0.2mm; }
-  .foot { position: absolute; display: flex; align-items: center; justify-content: space-between; gap: 4mm; font: 500 2.4mm/3mm var(--font); color: #444; white-space: nowrap; }
-  .foot .bar { display: flex; align-items: center; gap: 1.5mm; }
-  .foot svg { display: block; }
+  .page > svg { display: block; }
 
   @media print {
     html, body { overflow: visible; background: #fff; }
@@ -89,11 +82,15 @@
   <div class="fold"><span id="foldText"></span><button class="btn line small" id="foldBtn" aria-expanded="false" aria-controls="controls">Edit</button></div>
   <label class="wide">Set <select id="set"></select></label>
   <h2 class="sect">Markers</h2>
-  <label>Size, mm <input id="size" type="number" min="5" max="250" value="50" step="any" inputmode="decimal" title="The black square, edge to edge"></label>
-  <label>White border <select id="quiet"><option value="1">1 cell</option><option value="2">2 cells</option><option value="3">3 cells</option><option value="4">4 cells</option></select></label>
+  <label>Tag size, mm <input id="size" type="number" min="3" max="250" value="50" step="any" inputmode="decimal" title="The black square, edge to edge"></label>
+  <label>Border, mm <input id="border" type="number" min="0" max="50" value="5" step="any" inputmode="decimal" title="Background around the black square"></label>
   <label>Ink <span class="colour"><input id="ink" type="color" value="#000000"><span id="inkHex">#000000</span></span></label>
   <label>Background <span class="colour"><input id="bg" type="color" value="#ffffff"><span id="bgHex">#ffffff</span></span></label>
-  <label>Labels <select id="labels"><option value="full">Set and ID</option><option value="id">ID only</option><option value="off">Off</option></select></label>
+  <label>Labels <select id="labels"><option value="id">ID</option><option value="full">Set and ID</option><option value="off">Off</option></select></label>
+  <h2 class="sect">Cutting</h2>
+  <label class="wide">Guides <select id="cut"><option value="outline">Outline, for a cutter</option><option value="grid">Dashed grid, for scissors</option><option value="none">None</option></select></label>
+  <label data-cut="outline">Line colour <span class="colour"><input id="line" type="color" value="#ff0000"><span id="lineHex">#ff0000</span></span></label>
+  <label data-cut="outline">Line width, mm <input id="lineW" type="number" min="0.01" max="2" value="0.1" step="any" inputmode="decimal"></label>
   <h2 class="sect">IDs</h2>
   <label>Choose <select id="mode"><option value="fill">Fill pages</option><option value="list">List of IDs</option></select></label>
   <label data-mode="fill">From ID <input id="start" type="number" min="0" value="0" inputmode="numeric"></label>
@@ -102,25 +99,24 @@
   <h2 class="sect">Page</h2>
   <label>Paper <select id="paper"><option value="a4">A4</option><option value="letter">Letter</option></select></label>
   <label>Orientation <select id="orient"><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></label>
-  <label>Spacing, mm <input id="gap" type="number" min="0" max="50" value="4" step="any" inputmode="decimal" title="Between neighbouring markers' white borders"></label>
+  <label>Spacing, mm <input id="gap" type="number" min="0" max="50" value="3" step="any" inputmode="decimal" title="Between neighbouring tags, border to border"></label>
   <label>Margin, mm <input id="margin" type="number" min="0" max="40" value="10" step="any" inputmode="decimal" title="Around the edge of the page"></label>
-  <label>Cut lines <select id="cuts"><option value="1">On</option><option value="0">Off</option></select></label>
   <p class="note warn" id="warn" hidden></p>
   <p class="note" id="hint">Print at 100%.</p>
-  <button class="btn ink print" id="print">Print</button>
+  <div class="actions"><button class="btn ink" id="print">Print</button><button class="btn line" id="svg" title="For Cricut Design Space or laser software">Save SVG</button></div>
 </div>
 <p class="summary" id="summary"></p>
 <div class="pages" id="pages-out"></div>
 
 <script src="vendor/cv.js"></script>
 <script src="vendor/aruco.js"></script>
-<script src="markers.js?v=34"></script>
+<script src="markers.js?v=35"></script>
 <script>
 const SETS = MARKER_SETS.map((s) => ({ label: s.name, base: s.base, count: s.count }));
 const PAPERS = { a4: { name: 'A4', w: 210, h: 297 }, letter: { name: 'letter', w: 215.9, h: 279.4 } };
 // All layout numbers are millimetres.
 const FOOT = 6, LABEL = 4;
-const MAX_MARKERS = 300;
+const MAX_MARKERS = 2000;
 const $ = (id) => document.getElementById(id);
 const setSel = $('set');
 for (const s of SETS) setSel.add(new Option(s.label, s.label));
@@ -153,39 +149,8 @@ function parseIds(text, max) {
   return { ids, skipped, capped };
 }
 
-// Grid for one page. Each marker gets an equal slot; slots are at least `gap` wider/taller than
-// the marker (white border and label included), so neighbours are >= gap apart and cut lines
-// fall on slot edges. `mm` is the black square; `n` its cells, black edge included.
-function layout(paper, landscape, mm, n, o) {
-  const W = landscape ? paper.h : paper.w, H = landscape ? paper.w : paper.h;
-  const availW = W - 2 * o.margin, availH = H - 2 * o.margin - FOOT;
-  const labH = o.labels !== 'off' ? LABEL : 0;
-  const k = (n + 2 * o.quiet) / n;
-  const fitMm = Math.floor(Math.min((availW - o.gap) / k, (availH - o.gap - labH) / k) * 10) / 10;
-  const size = Math.min(mm, fitMm);
-  const markW = size * k;
-  const cols = Math.max(1, Math.floor((availW + 1e-6) / (markW + o.gap)));
-  const rows = Math.max(1, Math.floor((availH + 1e-6) / (markW + labH + o.gap)));
-  return { W, H, availH, mm: size, fitMm, markW, cols, rows, per: cols * rows, slotW: availW / cols, slotH: availH / rows, margin: o.margin };
-}
-
-// A marker as SVG: `quiet` cells of background around the black (ink) square, its code
-// cells in background colour. One path per colour, so it prints without hairline seams.
-function markerSvg(dict, id, quiet, ink, bg) {
-  const code = dict.codeList[id], n = dict.markSize - 2, t = n + 2 + 2 * quiet;
-  let d = '';
-  for (let y = 0; y < n; y++) {
-    for (let x = 0; x < n; x++) {
-      if (code[y * n + x] !== '1') continue;
-      let e = x;
-      while (e + 1 < n && code[y * n + e + 1] === '1') e++;
-      d += `M${x + quiet + 1} ${y + quiet + 1}h${e - x + 1}v1h${x - e - 1}z`;
-      x = e;
-    }
-  }
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${t} ${t}"><rect width="${t}" height="${t}" fill="${bg}"/>`
-    + `<rect x="${quiet}" y="${quiet}" width="${n + 2}" height="${n + 2}" fill="${ink}"/><path d="${d}" fill="${bg}"/></svg>`;
-}
+const f = (v) => +v.toFixed(3);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
 
 // Relative luminance (WCAG) of #rrggbb, for the contrast warning.
 function luminance(hex) {
@@ -193,36 +158,81 @@ function luminance(hex) {
   return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
 }
 
-const f = (v) => +v.toFixed(3);
-const esc = (s) => String(s).replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+// A grid at exactly the chosen spacing, centred on the page. Each tag is the black square
+// (`mm`) plus `border` on every side; its label, if any, sits under it.
+function layout(paper, landscape, o) {
+  const W = landscape ? paper.h : paper.w, H = landscape ? paper.w : paper.h;
+  const availW = W - 2 * o.margin, availH = H - 2 * o.margin - FOOT;
+  const fs = o.labels === 'off' ? 0 : Math.max(1.6, Math.min(2.6, (o.mm + 2 * o.border) * 0.16)); // label size, mm
+  const labH = fs ? fs + 1 : 0;
+  const fitMm = Math.floor((Math.min(availW, availH - labH) - 2 * o.border) * 10) / 10;
+  const mm = Math.max(1, Math.min(o.mm, fitMm));
+  const markW = mm + 2 * o.border;
+  const pitchX = markW + o.gap, pitchY = markW + labH + o.gap;
+  const cols = Math.max(1, Math.floor((availW + o.gap + 1e-6) / pitchX));
+  const rows = Math.max(1, Math.floor((availH + o.gap + 1e-6) / pitchY));
+  const gridW = cols * pitchX - o.gap, gridH = rows * pitchY - o.gap;
+  return {
+    W, H, mm, fitMm, markW, fs, labH, cols, rows, per: cols * rows, pitchX, pitchY,
+    x0: o.margin + Math.max(0, (availW - gridW) / 2), y0: o.margin + Math.max(0, (availH - gridH) / 2),
+  };
+}
 
-function pageHtml(L, chunk, dict, set, opts, i, total) {
-  const M = L.margin;
-  const svgSize = `width="${f(L.markW)}mm" height="${f(L.markW)}mm"`;
-  let h = '';
-  chunk.forEach((id, j) => {
-    const c = j % L.cols, r = (j / L.cols) | 0;
-    h += `<div class="slot" style="left:${f(M + c * L.slotW)}mm;top:${f(M + r * L.slotH)}mm;width:${f(L.slotW)}mm;height:${f(L.slotH)}mm">`;
-    h += markerSvg(dict, id, opts.quiet, opts.ink, opts.bg).replace('<svg ', `<svg ${svgSize} `);
-    if (opts.labels !== 'off') {
-      // Set and ID when it fits the slot (a glyph is ~0.6em of 2.6 mm), else just the ID.
-      const full = `${set.label} · ${id}`;
-      h += `<div class="cap">${esc(opts.labels === 'full' && full.length * 1.6 < L.slotW - 1 ? full : id)}</div>`;
+// One tag at (x, y), all in mm: background square, the black (ink) square inset by the
+// border, and the code's light cells as one path, so nothing prints with hairline seams.
+function tagSvg(dict, id, x, y, L, o) {
+  const code = dict.codeList[id], n = dict.markSize - 2, cell = L.mm / (n + 2);
+  const ix = x + o.border + cell, iy = y + o.border + cell;
+  let d = '';
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      if (code[r * n + c] !== '1') continue;
+      let e = c;
+      while (e + 1 < n && code[r * n + e + 1] === '1') e++;
+      d += `M${f(ix + c * cell)} ${f(iy + r * cell)}h${f((e - c + 1) * cell)}v${f(cell)}h${f(-(e - c + 1) * cell)}z`;
+      c = e;
     }
-    h += '</div>';
-  });
-  if (opts.cuts) {
-    const usedRows = Math.ceil(chunk.length / L.cols), usedCols = usedRows > 1 ? L.cols : chunk.length;
-    const gw = usedCols * L.slotW, gh = usedRows * L.slotH;
-    for (let c = 0; c <= usedCols; c++) h += `<i class="cut v" style="left:${f(M + c * L.slotW - 0.1)}mm;top:${M}mm;height:${f(gh)}mm"></i>`;
-    for (let r = 0; r <= usedRows; r++) h += `<i class="cut h" style="left:${M}mm;top:${f(M + r * L.slotH - 0.1)}mm;width:${f(gw)}mm"></i>`;
   }
-  // The footer sits in the margin's last 4 mm, or just inside the page edge when there is none.
-  const fy = Math.min(L.H - M - 4, L.H - 5);
-  h += `<div class="foot" style="left:${f(Math.max(M, 4))}mm;width:${f(L.W - 2 * Math.max(M, 4))}mm;top:${f(fy)}mm;height:4mm">`
-    + `<span>${esc(set.label)} · ${L.mm} mm · page ${i + 1} of ${total}</span>`
-    + `<span class="bar"><svg width="10mm" height="1.5mm" viewBox="0 0 10 1.5"><rect width="10" height="1.5" fill="#000"/></svg>10 mm</span></div>`;
-  return `<div class="pagewrap"><div class="page">${h}</div></div>`;
+  return `<rect x="${f(x)}" y="${f(y)}" width="${f(L.markW)}" height="${f(L.markW)}" fill="${o.bg}"/>`
+    + `<rect x="${f(x + o.border)}" y="${f(y + o.border)}" width="${f(L.mm)}" height="${f(L.mm)}" fill="${o.ink}"/>`
+    + `<path d="${d}" fill="${o.bg}"/>`;
+}
+
+// A whole page as one SVG in millimetres: what is shown, printed and downloaded is the same.
+// Cut outlines lie exactly on each tag's outer edge, as cutting software expects.
+function pageSvg(L, chunk, dict, set, o, i, total) {
+  let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${f(L.W)}mm" height="${f(L.H)}mm" viewBox="0 0 ${f(L.W)} ${f(L.H)}" font-family="Geist, Helvetica, Arial, sans-serif">`
+    + `<rect width="${f(L.W)}" height="${f(L.H)}" fill="#fff"/><g shape-rendering="crispEdges">`;
+  let labels = '', outlines = '';
+  chunk.forEach((id, j) => {
+    const x = L.x0 + (j % L.cols) * L.pitchX, y = L.y0 + ((j / L.cols) | 0) * L.pitchY;
+    s += tagSvg(dict, id, x, y, L, o);
+    if (L.fs) {
+      // Set and ID when it fits under the tag (a glyph is ~0.6em), else just the ID.
+      const full = `${set.label} · ${id}`;
+      const text = o.labels === 'full' && full.length * L.fs * 0.6 < L.pitchX ? full : id;
+      labels += `<text x="${f(x + L.markW / 2)}" y="${f(y + L.markW + L.fs * 0.95)}" font-size="${f(L.fs)}" text-anchor="middle" fill="#222">${esc(text)}</text>`;
+    }
+    if (o.cut === 'outline') outlines += `<rect x="${f(x)}" y="${f(y)}" width="${f(L.markW)}" height="${f(L.markW)}"/>`;
+  });
+  s += '</g>' + labels;
+  if (outlines) s += `<g fill="none" stroke="${o.line}" stroke-width="${f(o.lineW)}">${outlines}</g>`;
+  if (o.cut === 'grid' && chunk.length) {
+    // Dashed lines halfway between neighbours, around the tags actually on this page.
+    const rowsUsed = Math.ceil(chunk.length / L.cols), colsUsed = rowsUsed > 1 ? L.cols : chunk.length;
+    const half = o.gap / 2, gx0 = L.x0 - half, gy0 = L.y0 - half;
+    const gx1 = gx0 + colsUsed * L.pitchX, gy1 = gy0 + rowsUsed * L.pitchY;
+    let g = '';
+    for (let c = 0; c <= colsUsed; c++) g += `M${f(gx0 + c * L.pitchX)} ${f(gy0)}V${f(gy1)}`;
+    for (let r = 0; r <= rowsUsed; r++) g += `M${f(gx0)} ${f(gy0 + r * L.pitchY)}H${f(gx1)}`;
+    s += `<path d="${g}" fill="none" stroke="#aaa" stroke-width="0.2" stroke-dasharray="1 1"/>`;
+  }
+  // Footer with a 10 mm bar to check the print scale.
+  const fy = L.H - Math.max(o.margin, 4) - 1, fx = Math.max(o.margin, 4);
+  s += `<text x="${f(fx)}" y="${f(fy)}" font-size="2.4" fill="#444">${esc(set.label)} · ${L.mm} mm tag · ${f(o.border)} mm border · page ${i + 1} of ${total}</text>`
+    + `<rect x="${f(L.W - fx - 10)}" y="${f(fy - 1.6)}" width="10" height="1.5" fill="#000"/>`
+    + `<text x="${f(L.W - fx - 11.5)}" y="${f(fy)}" font-size="2.4" fill="#444" text-anchor="end">10 mm</text>`;
+  return s + '</svg>';
 }
 
 const out = $('pages-out');
@@ -239,6 +249,7 @@ function fitScale() {
 }
 
 let token = 0;
+let pages = [], fileStem = 'aruco';
 async function render() {
   const mine = ++token;
   const listMode = $('mode').value === 'list';
@@ -250,13 +261,15 @@ async function render() {
   const max = (set.count || dict.codeList.length) - 1;
   const num = (id, lo, hi, dflt) => { const v = parseFloat($(id).value); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : dflt; };
   const opts = {
-    labels: $('labels').value, cuts: $('cuts').value === '1', quiet: +$('quiet').value,
-    ink: $('ink').value, bg: $('bg').value, gap: num('gap', 0, 50, 4), margin: num('margin', 0, 40, 10),
+    mm: num('size', 3, 250, 50), border: num('border', 0, 50, 5), labels: $('labels').value,
+    ink: $('ink').value, bg: $('bg').value, cut: $('cut').value, line: $('line').value, lineW: num('lineW', 0.01, 2, 0.1),
+    gap: num('gap', 0, 50, 3), margin: num('margin', 0, 40, 10),
   };
-  $('inkHex').textContent = opts.ink; $('bgHex').textContent = opts.bg;
+  for (const el of document.querySelectorAll('[data-cut]')) el.hidden = el.dataset.cut !== opts.cut;
+  $('inkHex').textContent = opts.ink; $('bgHex').textContent = opts.bg; $('lineHex').textContent = opts.line;
   const paper = PAPERS[$('paper').value], landscape = $('orient').value === 'landscape';
-  const want = num('size', 5, 250, 50);
-  const L = layout(paper, landscape, want, dict.markSize, opts);
+  const want = opts.mm;
+  const L = layout(paper, landscape, opts);
   save();
 
   let ids, warn = '';
@@ -279,19 +292,23 @@ async function render() {
   const [hi, lo] = [luminance(opts.ink), luminance(opts.bg)].sort((a, b) => b - a);
   if ((hi + 0.05) / (lo + 0.05) < 4.5) warn = 'Low contrast between ink and background; markers may not read. Dark ink on a light background works best. ' + warn;
   else if (luminance(opts.ink) > luminance(opts.bg)) warn = 'Light ink on a dark background is inverted; most readers (this one included) expect dark markers on a light background. ' + warn;
+  // Readers find a marker by its black edge against something lighter all round.
+  const cellMm = L.mm / dict.markSize;
+  if (opts.border < cellMm) warn = `The border is narrower than one cell (${+cellMm.toFixed(1)} mm); place tags on a plain light surface so they still read. ` + warn;
   showWarn(warn);
 
   $('pagerule').textContent = `@page { size: ${paper.name} ${landscape ? 'landscape' : 'portrait'}; margin: 0; }`;
   out.style.setProperty('--pw', L.W + 'mm');
   out.style.setProperty('--ph', L.H + 'mm');
   const total = Math.ceil(ids.length / L.per);
-  let html = '';
-  for (let i = 0; i < total; i++) html += pageHtml(L, ids.slice(i * L.per, (i + 1) * L.per), dict, set, opts, i, total);
-  out.innerHTML = html; // one write, one layout
+  pages = [];
+  for (let i = 0; i < total; i++) pages.push(pageSvg(L, ids.slice(i * L.per, (i + 1) * L.per), dict, set, opts, i, total));
+  out.innerHTML = pages.map((p) => `<div class="pagewrap"><div class="page">${p}</div></div>`).join(''); // one write, one layout
+  fileStem = `aruco-${set.label.toLowerCase()}-${L.mm}mm`;
   fitScale();
   $('foldText').textContent = `${set.label} · ${$('paper').selectedOptions[0].text} · ${L.mm} mm`;
-  $('summary').textContent = `${ids.length} marker${ids.length === 1 ? '' : 's'} · ${total} page${total === 1 ? '' : 's'} · ${L.mm} mm · ${+L.markW.toFixed(1)} mm with border · up to ${L.per} per page (${L.cols}×${L.rows})`;
-  $('print').disabled = !ids.length;
+  $('summary').textContent = `${ids.length} tag${ids.length === 1 ? '' : 's'} · ${total} page${total === 1 ? '' : 's'} · ${L.mm} mm + ${f(opts.border)} mm border = ${f(L.markW)} mm · up to ${L.per} per page (${L.cols}×${L.rows})`;
+  $('print').disabled = $('svg').disabled = !ids.length;
 }
 function showWarn(text) {
   $('warn').textContent = text;
@@ -305,7 +322,7 @@ function schedule() {
   requestAnimationFrame(() => { queued = false; render(); });
 }
 // Every choice is remembered on this device, except which IDs to print.
-const KEEP = ['paper', 'orient', 'size', 'quiet', 'ink', 'bg', 'labels', 'cuts', 'gap', 'margin'];
+const KEEP = ['paper', 'orient', 'size', 'border', 'ink', 'bg', 'labels', 'cut', 'line', 'lineW', 'gap', 'margin'];
 function save() {
   try { localStorage.setItem('print', JSON.stringify(Object.fromEntries(KEEP.map((k) => [k, $(k).value])))); } catch {}
 }
@@ -325,6 +342,18 @@ $('foldBtn').onclick = () => {
   $('foldBtn').setAttribute('aria-expanded', String(!folded));
 };
 $('print').onclick = () => window.print();
+// One SVG file per page, sized in mm, for cutting machines (Cricut Design Space) and laser
+// software. The outline colour marks the cut lines.
+$('svg').onclick = () => {
+  pages.forEach((svg, i) => {
+    const url = URL.createObjectURL(new Blob(['<?xml version="1.0" encoding="UTF-8"?>\n' + svg], { type: 'image/svg+xml' }));
+    const name = pages.length > 1 ? `${fileStem}-page${i + 1}.svg` : `${fileStem}.svg`;
+    setTimeout(() => {
+      Object.assign(document.createElement('a'), { href: url, download: name }).click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }, i * 300); // spaced out: browsers drop rapid back-to-back downloads
+  });
+};
 render();
 </script>
 </body>
